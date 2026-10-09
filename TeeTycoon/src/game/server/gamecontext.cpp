@@ -4042,8 +4042,8 @@ void CGameContext::RegisterDDRaceCommands()
 
 void CGameContext::RegisterChatCommands()
 {
-	Console()->Register("tt_menu_action", "s[action]", CFGFLAG_SERVER, ConTeeTycoonMenuAction, this, "Execute a TeeTycoon vote-menu action for the selecting player");
-	Console()->Register("tt_menu_info", "s[category]", CFGFLAG_SERVER, ConTeeTycoonMenuInfo, this, "Show private TeeTycoon vote-menu information to the selecting player");
+	Console()->Register("tt_menu_action", "s[action]", CFGFLAG_CHAT | CFGFLAG_SERVER, ConTeeTycoonMenuAction, this, "Execute a TeeTycoon vote-menu action for the selecting player");
+	Console()->Register("tt_menu_info", "s[category]", CFGFLAG_CHAT | CFGFLAG_SERVER, ConTeeTycoonMenuInfo, this, "Show private TeeTycoon vote-menu information to the selecting player");
 	Console()->Register("rules", "", CFGFLAG_CHAT | CFGFLAG_SERVER, ConRules, this, "Shows the server rules");
 	Console()->Register("credits", "", CFGFLAG_CHAT | CFGFLAG_SERVER, ConCredits, this, "Shows the TeeTycoon credits");
 	Console()->Register("register", "?s[username] s[password]", CFGFLAG_CHAT | CFGFLAG_SERVER, ConRegister, this, "Create an account and travel to your house");
