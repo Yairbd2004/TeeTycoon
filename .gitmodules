@@ -1,0 +1,3 @@
+[submodule "ddnet-libs"]
+	path = TeeTycoon/ddnet-libs
+	url = https://github.com/ddnet/ddnet-libs.git

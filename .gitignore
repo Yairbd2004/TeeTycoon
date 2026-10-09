@@ -1,0 +1,11 @@
+# Visual Studio workspace state
+/TeeTycoon/.vs/
+
+# CMake and other local build outputs
+/TeeTycoon/out/
+
+# Runtime account database and event state
+/TeeTycoon/Accounts.sqlite
+/TeeTycoon/ddnet-server.sqlite
+/TeeTycoon/StartingEvent.txt
+/TeeTycoon/EventType.txt
