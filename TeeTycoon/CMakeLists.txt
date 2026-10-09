@@ -1754,6 +1754,7 @@ set(EXPECTED_DATA
   maps/Gold\ Mine.map
   maps/LearnToPlay.map
   maps/Sunny\ Side\ Up.map
+  maps/TeeTycoon.map
   maps/Tsunami.map
   maps/Tutorial.map
   maps/coverage.map
