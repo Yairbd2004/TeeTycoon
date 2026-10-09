@@ -19,6 +19,7 @@ Project references:
 
 - Git repository: `https://github.com/Yairbd2004/TeeTycoon.git` (`origin`).
 - Work on `dev`; it is the upgraded TeeTycoon branch. `main` is retained as the legacy DDNet 15.9.1-based baseline. Keep only these two local branches unless the user asks otherwise.
+- The new-PC checkout inspected for this handoff currently has `dev`, `main`, and the `origin` branch refs at `f43b9c1` (`Initial commit`). This does not contain the historical commit chain described below; inspect the actual branch/log before relying on old hashes or assuming the branches differ.
 - The current `dev` source is based on DDNet 20.1.1, upstream commit `647a2db7e3581c1deb45ff5dd877a41278a22798`, imported under `TeeTycoon/` as a Git subtree. The current handoff baseline at the time this file was written is root commit `fc1a54598` (`Fix stale client changes after DDNet port`). Always inspect `git log` for newer work instead of treating this hash as permanently current.
 - The upstream remote is named `upstream` and should point to `https://github.com/ddnet/ddnet.git`. A fresh clone may only configure `origin`; add `upstream` if missing.
 - `TeeTycoon/ddnet-libs` is the pinned upstream dependency submodule. Root `.gitmodules` maps it there; its currently pinned commit is `c0e6703fbcdbe03df2f26875427ec3951ce4ec21`. Initialize it after cloning.
@@ -31,14 +32,15 @@ Windows is the platform on which the current port was compiled. A compatible new
 
 1. Install Git for Windows.
 2. Install Visual Studio (the IDE or Build Tools) with **Desktop development with C++**, MSVC x64 tools, a Windows SDK, and CMake tools. Ensure Ninja is available; the tested Visual Studio installation bundled CMake and Ninja.
-3. Install Rust with `rustup`, then install/select the project-tested toolchain:
+3. Install Python 3 and make its interpreter available to CMake. DDNet 20.1.1's configure step requires Python 3 for code generation; Python 3.12.14 was used for the current server/client builds. In Developer PowerShell, set `$pythonExe = (Get-Command python).Source`; if Python is not on `PATH`, set `$pythonExe` to its full path and pass it to each configure command below.
+4. Install Rust with `rustup`, then install/select the project-tested toolchain:
 
    ```powershell
    rustup toolchain install 1.85.0
    ```
 
    Configure builds with `RUSTUP_TOOLCHAIN=1.85.0` as shown below. If a future source update requires another Rust version, verify it from the project/Cargo files and build, then record the change here.
-4. Clone the repository and initialize the dependency submodule:
+5. Clone the repository and initialize the dependency submodule:
 
    ```powershell
    git clone https://github.com/Yairbd2004/TeeTycoon.git
@@ -48,30 +50,35 @@ Windows is the platform on which the current port was compiled. A compatible new
    git remote add upstream https://github.com/ddnet/ddnet.git
    ```
 
-   If `upstream` already exists, verify its URL instead of adding a duplicate. Confirm that `git status` is clean and that `git submodule status` shows the pinned `ddnet-libs` checkout.
-5. Open **Developer PowerShell for Visual Studio** (or a Developer Command Prompt) so MSVC's compiler and Windows SDK environment are configured. From the repository root, configure/build the server:
+   If `upstream` already exists, verify its URL instead of adding a duplicate. Confirm that `git status` is clean. A normal gitlink checkout should show the pinned `ddnet-libs` checkout in `git submodule status`; the current `f43b9c1` snapshot instead contains a flattened `TeeTycoon/ddnet-libs` tree, so submodule status is empty.
+6. Open **Developer PowerShell for Visual Studio** (or a Developer Command Prompt) so MSVC's compiler and Windows SDK environment are configured. From the repository root, configure/build the server:
 
    ```powershell
    $env:RUSTUP_TOOLCHAIN = "1.85.0"
+   $pythonExe = (Get-Command python).Source
    cmake -S TeeTycoon -B TeeTycoon/out/build/20.1.1-msvc -G Ninja `
      -DCMAKE_BUILD_TYPE=Debug -DCLIENT=OFF -DSERVER=ON -DPREFER_BUNDLED_LIBS=ON `
+     -DPython3_EXECUTABLE="$pythonExe" -DDOWNLOAD_GTEST=OFF `
      -DRUST_RUSTC="$env:USERPROFILE\.rustup\toolchains\1.85.0-x86_64-pc-windows-msvc\bin\rustc.exe" `
      -DRUST_CARGO="$env:USERPROFILE\.rustup\toolchains\1.85.0-x86_64-pc-windows-msvc\bin\cargo.exe"
    cmake --build TeeTycoon/out/build/20.1.1-msvc --target game-server
    ```
 
    The server binary is `TeeTycoon/out/build/20.1.1-msvc/DDNet-Server.exe`. CMake stages `storage.cfg` beside it and the tracked `data/` files, including `autoexec_server.cfg` and `myServerconfig.cfg`, into the build's `data` directory on configure. The two TeeTycoon server configs are configure dependencies, so changing them causes CMake to refresh the staged copies on the next build.
-6. To compile the client/editor too, use a separate build directory:
+7. To compile the client/editor too, use a separate build directory:
 
    ```powershell
    cmake -S TeeTycoon -B TeeTycoon/out/build/20.1.1-client-msvc -G Ninja `
-     -DCMAKE_BUILD_TYPE=Debug -DCLIENT=ON -DSERVER=OFF -DPREFER_BUNDLED_LIBS=ON
+     -DCMAKE_BUILD_TYPE=Debug -DCLIENT=ON -DSERVER=OFF -DPREFER_BUNDLED_LIBS=ON `
+     -DPython3_EXECUTABLE="$pythonExe" -DDOWNLOAD_GTEST=OFF
    cmake --build TeeTycoon/out/build/20.1.1-client-msvc --target game-client
    ```
 
    The client binary is `TeeTycoon/out/build/20.1.1-client-msvc/DDNet.exe`.
 
-Use a new versioned build directory when changing DDNet versions or toolchains. `out/` is ignored by Git and keeps generated files separate from source. CMake may download build-time dependencies on the first configure, so allow network access.
+Use a new versioned build directory when changing DDNet versions or toolchains. `out/` is ignored by Git and keeps generated files separate from source. CMake 3.22.1, Ninja 1.10.2, and Python 3.12.14 were used for the current builds. CMake may download build-time dependencies on the first configure, so allow network access. `DOWNLOAD_GTEST=OFF` avoids downloading the optional test dependency when only building the server/client.
+
+The checkout at `f43b9c1` stores `TeeTycoon/ddnet-libs` as ordinary tracked files rather than an initialized Git submodule, and some required Windows DLLs are ignored by Git. If configure reports a missing `libcurl.dll`, `zlib1.dll`, or other dependency DLL, restore the Windows x64 DLL files from the pinned `ddnet-libs` commit `c0e6703fbcdbe03df2f26875427ec3951ce4ec21` into the matching `TeeTycoon/ddnet-libs/<library>/windows/lib64/` directories. This checkout also needs `TeeTycoon/cmake/checksummed_extra.txt`, whose contents are in DDNet commit `647a2db7e3581c1deb45ff5dd877a41278a22798`; both items were restored locally for this build and remain ignored.
 
 ### Starting the server and preserving runtime data
 

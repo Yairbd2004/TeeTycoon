@@ -7,7 +7,7 @@ TeeTycoon is a DDNet-based tycoon and social game mode. It adds player accounts,
 - `main` keeps the original DDNet 15.9.1-based source as the legacy baseline.
 - `dev` is the upgrade branch, based on upstream DDNet 20.1.1, with the TeeTycoon features ported onto it.
 
-The original local `out` build and account data were preserved. The 20.1.1 server build and matching copies of the account/server databases are under `TeeTycoon/out/build/20.1.1-msvc/`.
+The original development computer's ignored `out` build and account data are not included in a fresh clone. Build outputs and runtime databases are local files under `TeeTycoon/out/`; recover databases and private configuration only from a verified backup before starting a server with existing player accounts.
 
 For the upstream upgrade and build workflow, see [UPGRADING.md](UPGRADING.md).
 
