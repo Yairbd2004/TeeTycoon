@@ -171,6 +171,14 @@ def make_geometry() -> None:
         (420, 67, 6), (443, 116, 8), (351, 60, 6), (226, 65, 8),
     ]:
         platform(x, y, w, 16, nohook=(x, y) in {(181, 151), (326, 188), (392, 88)})
+    # Three climbable routes keep the whole vertical arena in reach after a
+    # player falls. Eleven-tile steps fit within hook/jump travel and the
+    # stagger leaves open lanes for long blocker hooks between the routes.
+    for base in (145, 274, 427):
+        for tier in range(15):
+            y = 212 - tier * 11
+            x = base + (6 if tier % 2 else 0)
+            platform(x, y, 7, 16)
     # Stepped side walls create hook points and clean lines for block throws.
     rect(game, 176, 164, 179, 197, SOLID)
     rect(arch, 176, 164, 179, 197, 16)
