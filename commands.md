@@ -111,6 +111,8 @@ Set these in the server config or RCON, for example `sv_bot_damage_mode 1`.
 
 ## RCON administration
 
+DDNet's built-in test commands (including `super`, `weapons`, `addweapon`, `freeze`, and movement helpers) are enabled in the server startup config. Commands without a player-ID argument apply to the authenticated RCON player's tee, so run them from the in-game RCON console while alive; the server's local terminal has no tee to modify. `sv_test_cmds` is read-only after startup, so changing it from RCON requires a server restart.
+
 These commands are server-console/RCON commands. Player arguments use the current in-game client ID shown by the server, and account changes require that player to be connected and logged in. Money, levels, and permanent upgrades are saved to `Accounts.sqlite` immediately.
 
 | Command | Example | Effect |
