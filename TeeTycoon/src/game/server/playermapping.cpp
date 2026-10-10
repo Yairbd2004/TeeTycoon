@@ -94,7 +94,7 @@ void CPlayerMapping::CPlayerMap::InitPlayer(CSixupCfg SixupCfg)
 		Finished = true;
 		for(int i = 0; i < MAX_CLIENTS; i++)
 		{
-			if(!m_pPlayerMapping->GameServer()->m_apPlayers[i])
+			if(!m_pPlayerMapping->GameServer()->m_apPlayers[i] || m_pPlayerMapping->GameServer()->m_apPlayers[i]->m_IsBot)
 				continue;
 
 			const NETADDR *pAddr = m_pPlayerMapping->Server()->ClientAddr(i);
@@ -168,7 +168,7 @@ void CPlayerMapping::CPlayerMap::InitPlayer(CSixupCfg SixupCfg)
 
 	for(int i = 0; i < MAX_CLIENTS; i++)
 	{
-		if(!m_pPlayerMapping->GameServer()->m_apPlayers[i] || i == m_ClientId)
+		if(!m_pPlayerMapping->GameServer()->m_apPlayers[i] || m_pPlayerMapping->GameServer()->m_apPlayers[i]->m_IsBot || i == m_ClientId)
 			continue;
 
 		const NETADDR *pAddr = m_pPlayerMapping->Server()->ClientAddr(i);
@@ -235,7 +235,7 @@ int CPlayerMapping::CPlayerMap::Remove(int MapId)
 
 void CPlayerMapping::CPlayerMap::Update()
 {
-	if(!m_pPlayerMapping->Server()->ClientIngame(m_ClientId) || !Player())
+	if(!m_pPlayerMapping->Server()->ClientIngame(m_ClientId) || !Player() || Player()->IsBot())
 		return;
 	if(m_pPlayerMapping->Server()->ClientSupportsServerMaxClients(m_ClientId))
 		return;
@@ -252,6 +252,10 @@ void CPlayerMapping::CPlayerMap::Update()
 
 	bool ResortReserved = m_ResortReserved;
 	m_ResortReserved = false;
+	int HumanCount = 0;
+	for(int i = 0; i < m_pPlayerMapping->Server()->MaxClients(); i++)
+		if(m_pPlayerMapping->GameServer()->m_apPlayers[i] && !m_pPlayerMapping->GameServer()->m_apPlayers[i]->m_IsBot)
+			HumanCount++;
 
 	for(int i = 0; i < MAX_CLIENTS; i++)
 	{
@@ -266,11 +270,21 @@ void CPlayerMapping::CPlayerMap::Update()
 			m_aReserved[i] = false;
 			continue;
 		}
+		// A legacy client has a limited visible ID map. Human tees always take
+		// precedence; hide bots when those IDs are needed for humans.
+		if(pPlayer->m_IsBot && HumanCount >= MapSize() - m_NumSeeOthers)
+		{
+			Remove(m_pReverseMap[i]);
+			m_aReserved[i] = false;
+			continue;
+		}
 
 		// If a team (not 0) has more than 10 players, do not reserve their slots because it can get messy quickly if a few huge teams form.
 		// To keep teams state the same on main and dummy big teams do not get highlighted at all.
 		int DDTeam = m_pPlayerMapping->GameServer()->GetDDRaceTeam(i);
-		bool ReserveTeamSlots = m_pPlayerMapping->ReserveTeamSlots(DDTeam, m_ClientId);
+		bool ReserveTeamSlots = !pPlayer->m_IsBot && m_pPlayerMapping->ReserveTeamSlots(DDTeam, m_ClientId);
+		if(pPlayer->m_IsBot)
+			m_aReserved[i] = false;
 
 		if(m_aReserved[i])
 		{
@@ -341,6 +355,7 @@ void CPlayerMapping::CPlayerMap::InsertNextEmptyOrReplace(int ClientId)
 {
 	if(ClientId == -1 || m_pReverseMap[ClientId] != -1)
 		return;
+	const bool IncomingBot = m_pPlayerMapping->GameServer()->m_apPlayers[ClientId]->m_IsBot;
 
 	// Fast path: find an empty slot or a slot occupied by a character-less player.
 	for(int i = 0; i < MapSize() - m_NumSeeOthers; i++)
@@ -349,7 +364,7 @@ void CPlayerMapping::CPlayerMap::InsertNextEmptyOrReplace(int ClientId)
 		if(MappedClientId != -1 && m_aReserved[MappedClientId])
 			continue;
 
-		if(MappedClientId == -1 || (!m_pPlayerMapping->GameServer()->GetPlayerChar(MappedClientId) || m_pPlayerMapping->GameServer()->GetPlayerChar(MappedClientId)->NetworkClipped(m_ClientId)))
+		if(MappedClientId == -1 || (!IncomingBot || m_pPlayerMapping->GameServer()->m_apPlayers[MappedClientId]->m_IsBot) && (!m_pPlayerMapping->GameServer()->GetPlayerChar(MappedClientId) || m_pPlayerMapping->GameServer()->GetPlayerChar(MappedClientId)->NetworkClipped(m_ClientId)))
 		{
 			Add(i, ClientId);
 			return;
@@ -373,6 +388,14 @@ void CPlayerMapping::CPlayerMap::InsertNextEmptyOrReplace(int ClientId)
 		int MappedClientId = m_pMap[i];
 		if(MappedClientId == -1 || m_aReserved[MappedClientId])
 			continue;
+		const bool MappedBot = m_pPlayerMapping->GameServer()->m_apPlayers[MappedClientId]->m_IsBot;
+		if(IncomingBot && !MappedBot)
+			continue;
+		if(!IncomingBot && MappedBot)
+		{
+			Add(i, ClientId);
+			return;
+		}
 
 		CCharacter *pMappedChar = m_pPlayerMapping->GameServer()->GetPlayerChar(MappedClientId);
 		if(!pMappedChar)
@@ -452,7 +475,7 @@ void CPlayerMapping::UpdatePlayerMap(int ClientId)
 			for(int i = 0; i < MAX_CLIENTS; i++)
 			{
 				CPlayer *pPlayer = GameServer()->m_apPlayers[i];
-				if(!pPlayer)
+				if(!pPlayer || pPlayer->m_IsBot)
 					continue;
 				int DDTeam = GameServer()->GetDDRaceTeam(i);
 				m_aTeamSizes[DDTeam]++;
@@ -467,7 +490,9 @@ void CPlayerMapping::UpdatePlayerMap(int ClientId)
 
 		for(auto &Map : m_aMap)
 		{
-			if(!Map.Player() || Server()->ClientSupportsServerMaxClients(Map.m_ClientId))
+			// Bots occupy server client slots but have no network connection or client ID map.
+			// Treating them as viewers can send network updates to a nonexistent peer.
+			if(!Map.Player() || Map.Player()->IsBot() || Server()->ClientSupportsServerMaxClients(Map.m_ClientId))
 				continue;
 
 			// Calculate overhang every tick, not only when the map updates

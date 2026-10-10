@@ -86,7 +86,7 @@ class CServer : public IServer
 	int m_PreviousDebugDummies = 0;
 
 public:
-	int NewBot(int ClientID) override;
+	int NewBot(int ClientID, bool Virtual = false) override;
 	int DelBot(int ClientID) override;
 	class IGameServer *GameServer() { return m_pGameServer; }
 	class CConfig *Config() { return m_pConfig; }
@@ -143,6 +143,7 @@ public:
 		// connection state info
 		int m_State;
 		bool m_IsBot = false;
+		bool m_IsVirtualBot = false;
 		int m_Latency;
 		int m_SnapRate;
 
@@ -220,7 +221,7 @@ public:
 
 		bool IncludedInServerInfo() const
 		{
-			return m_State != STATE_EMPTY && !m_DebugDummy;
+			return m_State != STATE_EMPTY && !m_DebugDummy && !m_IsVirtualBot;
 		}
 	};
 

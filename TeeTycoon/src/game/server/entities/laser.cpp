@@ -92,6 +92,9 @@ bool CLaser::HitCharacter(vec2 From, vec2 To)
 			// Re-apply move restrictions as a part of 'shotgun bug' reproduction
 			pHit->ApplyMoveRestrictions();
 		}
+		if(Strength > 0.0f && m_Owner >= 0 && m_Owner < MAX_CLIENTS &&
+			GameServer()->m_apPlayers[m_Owner] && !GameServer()->m_apPlayers[m_Owner]->m_IsBot)
+			GameServer()->OnProtectedPlayerHurt(pHit->GetPlayer()->GetCid(), m_Owner, false);
 	}
 	else if(m_Type == WEAPON_LASER)
 	{

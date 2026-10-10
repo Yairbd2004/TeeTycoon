@@ -205,7 +205,11 @@ public:
 	void DeleteBot();
 	void BotStay(int ClientId, bool Stay);
 	void OwnerHurt(int ClientId, int EnemyId);
-	bool AddBot(int ClientId, int OwnerId, bool UseDropPlayer);
+	bool IsBotFrozen(const CCharacter *pCharacter);
+	void OnProtectedPlayerHurt(int VictimId, int EnemyId, bool DealtDamage);
+	void AutoBlockPetAggressor(int OwnerId, int EnemyId);
+	bool AddBot(int ClientId, int OwnerId, bool UseDropPlayer, bool Virtual = false);
+	int FindFreeBotId(bool Virtual) const;
 	bool ReplacePlayerByBot(int ClientId);
 	static int callbackTele(void *pData, int Argc, char **ppArgv, char **ppColumnNames);
 	static int callbackCheckExist(void *pData, int Argc, char **ppArgv, char **ppColumnNames);
@@ -213,6 +217,10 @@ public:
 	static int callbackName(void *pData, int Argc, char **ppArgv, char **ppColumnNames);
 	CBotEngine *m_pBotEngine = nullptr;
 	static void ConInviteHouse(IConsole::IResult *pResult, void *pUserData);
+	static void ConLeaveHouse(IConsole::IResult *pResult, void *pUserData);
+	void MovePlayerAndPet(int ClientId, int Team, vec2 Pos);
+	void EndHouseVisit(int ClientId);
+	void EndHouseVisitsOfHost(int HostId);
 	static void ConCredits(IConsole::IResult *pResult, void *pUserData);
 	static void ConAccept(IConsole::IResult *pResult, void *pUserData);
 	static void ConBuy(IConsole::IResult *pResult, void *pUserData);
@@ -224,6 +232,16 @@ public:
 	static void ConLogout(IConsole::IResult *pResult, void *pUserData);
 	static void ConPetProfile(IConsole::IResult *pResult, void *pUserData);
 	static void ConPetSpawn(IConsole::IResult *pResult, void *pUserData);
+	static void ConPetUpgrade(IConsole::IResult *pResult, void *pUserData);
+	static void ConPetRelation(IConsole::IResult *pResult, void *pUserData);
+	static void ConPetRelations(IConsole::IResult *pResult, void *pUserData);
+	static void ConPetFreezeTimeout(IConsole::IResult *pResult, void *pUserData);
+	static void ConBlockerSlot(IConsole::IResult *pResult, void *pUserData);
+	static void ConBlockerVirtual(IConsole::IResult *pResult, void *pUserData);
+	static void ConBlockerRemove(IConsole::IResult *pResult, void *pUserData);
+	static void ConBlockerList(IConsole::IResult *pResult, void *pUserData);
+	static void ConBlockerWhitelist(IConsole::IResult *pResult, void *pUserData);
+	static void ConBlockerFreezeTimeout(IConsole::IResult *pResult, void *pUserData);
 	static void ConProfile(IConsole::IResult *pResult, void *pUserData);
 	static void ConRegister(IConsole::IResult *pResult, void *pUserData);
 	static void ConShop(IConsole::IResult *pResult, void *pUserData);
@@ -386,6 +404,7 @@ public:
 	void SendTuningParams(int ClientId, int Zone = 0);
 
 	void ProgressVoteOptions(int ClientId);
+	void RefreshTeeTycoonVoteMenu(int ClientId);
 
 	//
 	void LoadMapSettings();
@@ -423,6 +442,7 @@ public:
 
 	bool OnClientDataPersist(int ClientId, void *pData) override;
 	void OnClientConnected(int ClientId, void *pData) override;
+	void OnBotSlotClaimed(int ClientId) override;
 	void OnClientEnter(int ClientId) override;
 	void OnClientDrop(int ClientId, const char *pReason) override;
 	void OnClientInfoChange(int ClientId) override;

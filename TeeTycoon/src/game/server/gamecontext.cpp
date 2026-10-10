@@ -8,6 +8,7 @@
 #include "gamemodes/ddnet.h"
 #include "gamemodes/mod.h"
 #include "player.h"
+#include "pet_skill_storage.h"
 #include "score.h"
 #include "teeinfo.h"
 
@@ -45,6 +46,8 @@
 #include <game/gamecore.h>
 #include <game/mapitems.h>
 #include <game/version.h>
+
+#include <sqlite3.h>
 
 #include <vector>
 
@@ -148,6 +151,11 @@ CGameContext::~CGameContext()
 	for(auto &pPlayer : m_apPlayers)
 	{
 		delete pPlayer;
+	}
+	if(db)
+	{
+		sqlite3_close(db);
+		db = nullptr;
 	}
 
 	if(!m_Resetting)
@@ -1136,6 +1144,8 @@ void CGameContext::SendTuningParams(int ClientId, int Zone)
 
 	dbg_assert(0 <= ClientId && ClientId < MAX_CLIENTS, "Invalid ClientId: %d", ClientId);
 	dbg_assert(m_apPlayers[ClientId], "client %d without player", ClientId);
+	if(m_apPlayers[ClientId]->m_IsBot)
+		return;
 
 	CTuningParams Params = m_aTuningList[Zone];
 
@@ -1212,7 +1222,6 @@ void CGameContext::OnTick()
 	{
 		if(pPlayer && pPlayer->IsBot() && pPlayer->m_pBot)
 		{
-			pPlayer->m_pBot->Tick();
 			const CNetObj_PlayerInput BotInput = pPlayer->m_pBot->GetInputData();
 			pPlayer->OnPredictedInput(&BotInput);
 		}
@@ -1271,6 +1280,22 @@ void CGameContext::OnTick()
 		if(pPlayer)
 			pPlayer->PostPostTick();
 	}
+	// Owner movement, admin team changes, and delayed bot respawns can happen
+	// outside the house commands. Keep a living pet in its owner's dimension.
+	for(auto *pPet : m_apPlayers)
+	{
+		if(!pPet || !pPet->m_IsBot || !pPet->m_pBot || !pPet->GetCharacter())
+			continue;
+		const int OwnerId = pPet->m_pBot->owner;
+		if(OwnerId < 0 || OwnerId >= MAX_CLIENTS || !m_apPlayers[OwnerId] || !m_apPlayers[OwnerId]->GetCharacter())
+			continue;
+		CCharacter *pOwner = m_apPlayers[OwnerId]->GetCharacter();
+		if(pPet->GetCharacter()->Team() != pOwner->Team())
+		{
+			m_pController->Teams().SetForceCharacterTeam(pPet->GetCid(), pOwner->Team());
+			Teleport(pPet->GetCharacter(), pOwner->m_Pos);
+		}
+	}
 
 	// update voting
 	if(m_VoteCloseTime)
@@ -1307,7 +1332,7 @@ void CGameContext::OnTick()
 				bool SinglePlayer = true;
 				for(int i = 0; i < MAX_CLIENTS; i++)
 				{
-					if(m_apPlayers[i])
+					if(m_apPlayers[i] && !m_apPlayers[i]->m_IsBot)
 					{
 						apAddresses[i] = Server()->ClientAddr(i);
 						if(!pFirstAddress)
@@ -1326,7 +1351,7 @@ void CGameContext::OnTick()
 				int64_t Now = Server()->Tick();
 				for(int i = 0; i < MAX_CLIENTS; i++)
 				{
-					if(!m_apPlayers[i] || aVoteChecked[i])
+					if(!m_apPlayers[i] || m_apPlayers[i]->m_IsBot || aVoteChecked[i])
 						continue;
 
 					if((IsKickVote() || IsSpecVote()) && (m_apPlayers[i]->GetTeam() == TEAM_SPECTATORS ||
@@ -1356,7 +1381,7 @@ void CGameContext::OnTick()
 					// check for more players with the same ip (only use the vote of the one who voted first)
 					for(int j = i + 1; j < MAX_CLIENTS; j++)
 					{
-						if(!m_apPlayers[j] || aVoteChecked[j] || net_addr_comp_noport(apAddresses[j], apAddresses[i]) != 0)
+						if(!m_apPlayers[j] || m_apPlayers[j]->m_IsBot || aVoteChecked[j] || net_addr_comp_noport(apAddresses[j], apAddresses[i]) != 0)
 							continue;
 
 						// count the latest vote by this ip
@@ -1382,7 +1407,7 @@ void CGameContext::OnTick()
 						for(int j = i; j < MAX_CLIENTS; j++)
 						{
 							// no need to check ip address of current player
-							if(i != j && (!m_apPlayers[j] || net_addr_comp_noport(apAddresses[j], apAddresses[i]) != 0))
+							if(i != j && (!m_apPlayers[j] || m_apPlayers[j]->m_IsBot || net_addr_comp_noport(apAddresses[j], apAddresses[i]) != 0))
 								continue;
 
 							if(m_apPlayers[j] && !m_apPlayers[j]->IsAfk() && m_apPlayers[j]->GetTeam() != TEAM_SPECTATORS &&
@@ -1659,11 +1684,14 @@ void CGameContext::ProgressVoteOptions(int ClientId)
 	if(pPl->m_SendVoteIndex == -1)
 		return; // we didn't start sending options yet
 
-	if(pPl->m_SendVoteIndex > m_NumVoteOptions)
+	if(pPl->m_vTeeTycoonVoteOptions.empty())
+		RefreshTeeTycoonVoteMenu(ClientId);
+	const int NumVoteOptions = static_cast<int>(pPl->m_vTeeTycoonVoteOptions.size());
+	if(pPl->m_SendVoteIndex > NumVoteOptions)
 		return; // shouldn't happen / fail silently
 
-	int VotesLeft = m_NumVoteOptions - pPl->m_SendVoteIndex;
-	int NumVotesToSend = std::min(g_Config.m_SvSendVotesPerTick, VotesLeft);
+	int VotesLeft = NumVoteOptions - pPl->m_SendVoteIndex;
+	int NumVotesToSend = std::min({g_Config.m_SvSendVotesPerTick, VotesLeft, 15});
 
 	if(!VotesLeft)
 	{
@@ -1691,36 +1719,29 @@ void CGameContext::ProgressVoteOptions(int ClientId)
 	OptionMsg.m_pDescription13 = "";
 	OptionMsg.m_pDescription14 = "";
 
-	const CVoteOptionServer *pCurrent;
-	if(pPl->m_SendVoteIndex == 0)
-		pCurrent = m_pVoteOptionFirst;
-	else
-		pCurrent = pPl->m_pLastSentVoteOption == nullptr ? nullptr : pPl->m_pLastSentVoteOption->m_pNext;
-
-	while(CurIndex < NumVotesToSend && pCurrent != nullptr)
+	while(CurIndex < NumVotesToSend)
 	{
+		const char *pDescription = pPl->m_vTeeTycoonVoteOptions[pPl->m_SendVoteIndex + CurIndex].m_Description.c_str();
 		switch(CurIndex)
 		{
-		case 0: OptionMsg.m_pDescription0 = pCurrent->m_aDescription; break;
-		case 1: OptionMsg.m_pDescription1 = pCurrent->m_aDescription; break;
-		case 2: OptionMsg.m_pDescription2 = pCurrent->m_aDescription; break;
-		case 3: OptionMsg.m_pDescription3 = pCurrent->m_aDescription; break;
-		case 4: OptionMsg.m_pDescription4 = pCurrent->m_aDescription; break;
-		case 5: OptionMsg.m_pDescription5 = pCurrent->m_aDescription; break;
-		case 6: OptionMsg.m_pDescription6 = pCurrent->m_aDescription; break;
-		case 7: OptionMsg.m_pDescription7 = pCurrent->m_aDescription; break;
-		case 8: OptionMsg.m_pDescription8 = pCurrent->m_aDescription; break;
-		case 9: OptionMsg.m_pDescription9 = pCurrent->m_aDescription; break;
-		case 10: OptionMsg.m_pDescription10 = pCurrent->m_aDescription; break;
-		case 11: OptionMsg.m_pDescription11 = pCurrent->m_aDescription; break;
-		case 12: OptionMsg.m_pDescription12 = pCurrent->m_aDescription; break;
-		case 13: OptionMsg.m_pDescription13 = pCurrent->m_aDescription; break;
-		case 14: OptionMsg.m_pDescription14 = pCurrent->m_aDescription; break;
+		case 0: OptionMsg.m_pDescription0 = pDescription; break;
+		case 1: OptionMsg.m_pDescription1 = pDescription; break;
+		case 2: OptionMsg.m_pDescription2 = pDescription; break;
+		case 3: OptionMsg.m_pDescription3 = pDescription; break;
+		case 4: OptionMsg.m_pDescription4 = pDescription; break;
+		case 5: OptionMsg.m_pDescription5 = pDescription; break;
+		case 6: OptionMsg.m_pDescription6 = pDescription; break;
+		case 7: OptionMsg.m_pDescription7 = pDescription; break;
+		case 8: OptionMsg.m_pDescription8 = pDescription; break;
+		case 9: OptionMsg.m_pDescription9 = pDescription; break;
+		case 10: OptionMsg.m_pDescription10 = pDescription; break;
+		case 11: OptionMsg.m_pDescription11 = pDescription; break;
+		case 12: OptionMsg.m_pDescription12 = pDescription; break;
+		case 13: OptionMsg.m_pDescription13 = pDescription; break;
+		case 14: OptionMsg.m_pDescription14 = pDescription; break;
 		}
 
-		pPl->m_pLastSentVoteOption = pCurrent;
 		CurIndex++;
-		pCurrent = pCurrent->m_pNext;
 	}
 
 	// send msg
@@ -1735,7 +1756,7 @@ void CGameContext::ProgressVoteOptions(int ClientId)
 
 	pPl->m_SendVoteIndex += NumVotesToSend;
 
-	if(pPl->m_SendVoteIndex == m_NumVoteOptions)
+	if(pPl->m_SendVoteIndex == NumVoteOptions)
 	{
 		CNetMsg_Sv_VoteOptionGroupEnd EndMsg;
 		Server()->SendPackMsg(&EndMsg, MSGFLAG_VITAL, ClientId);
@@ -1849,7 +1870,7 @@ void CGameContext::OnClientConnected(int ClientId, void *pData)
 		for(auto &pPlayer : m_apPlayers)
 		{
 			// connecting clients with spoofed ips can clog slots without being ingame
-			if(pPlayer && Server()->ClientIngame(pPlayer->GetCid()))
+			if(pPlayer && !pPlayer->m_IsBot && Server()->ClientIngame(pPlayer->GetCid()))
 			{
 				Empty = false;
 				break;
@@ -1870,6 +1891,12 @@ void CGameContext::OnClientConnected(int ClientId, void *pData)
 	Server()->ExpireServerInfo();
 }
 
+void CGameContext::OnBotSlotClaimed(int ClientId)
+{
+	if(ClientId >= 0 && ClientId < MAX_CLIENTS && m_apPlayers[ClientId] && m_apPlayers[ClientId]->m_IsBot)
+		DeleteBot(ClientId);
+}
+
 void CGameContext::OnClientInfoChange(int ClientId)
 {
 	if(m_apPlayers[ClientId])
@@ -1881,7 +1908,20 @@ void CGameContext::OnClientDrop(int ClientId, const char *pReason)
 	LogEvent("Disconnect", ClientId);
 
 	AbortVoteKickOnDisconnect(ClientId);
+	EndHouseVisitsOfHost(ClientId);
+	for(int OtherId = 0; OtherId < Server()->MaxClients(); OtherId++)
+	{
+		if(m_apPlayers[OtherId] && m_apPlayers[OtherId]->invited && m_apPlayers[OtherId]->inviteID == ClientId)
+		{
+			m_apPlayers[OtherId]->invited = false;
+			m_apPlayers[OtherId]->inviteID = -1;
+			SendChatTarget(OtherId, "Your house invitation ended because the host disconnected.");
+		}
+	}
 	m_pController->OnPlayerDisconnect(m_apPlayers[ClientId], pReason);
+	for(int BotId = 0; BotId < MAX_CLIENTS; BotId++)
+		if(m_apPlayers[BotId] && m_apPlayers[BotId]->m_IsBot && m_apPlayers[BotId]->m_pBot && m_apPlayers[BotId]->m_pBot->owner == ClientId)
+			DeleteBot(BotId);
 	delete m_apPlayers[ClientId];
 	m_apPlayers[ClientId] = nullptr;
 
@@ -2389,34 +2429,72 @@ void CGameContext::OnCallVoteNetMessage(const CNetMsg_Cl_CallVote *pMsg, int Cli
 	if(str_comp_nocase(pMsg->m_pType, "option") != 0 && m_PlayerMapping.DoSeeOthers(ClientId, str_toint(pMsg->m_pValue), true))
 		return;
 
-	// TeeTycoon menu actions are commands, not votes. Handle them before the
-	// normal vote delay/current-vote checks so the panel behaves like a menu.
+	// Only accept options currently shown to this player. Category and action
+	// rows are private menu interactions; event rows continue into the ordinary
+	// global ballot handling below.
 	if(str_comp_nocase(pMsg->m_pType, "option") == 0)
 	{
-		for(CVoteOptionServer *pOption = m_pVoteOptionFirst; pOption; pOption = pOption->m_pNext)
+		CPlayer *pPlayer = m_apPlayers[ClientId];
+		if(!pPlayer || pPlayer->m_IsBot)
+			return;
+		const CPlayer::CTeeTycoonVoteOption *pSelected = nullptr;
+		for(const auto &Option : pPlayer->m_vTeeTycoonVoteOptions)
 		{
-			if(str_comp_nocase(pMsg->m_pValue, pOption->m_aDescription) != 0)
-				continue;
-			if(str_startswith(pOption->m_aCommand, "tt_menu_action ") || str_startswith(pOption->m_aCommand, "tt_menu_info "))
+			if(str_comp_nocase(pMsg->m_pValue, Option.m_Description.c_str()) == 0)
 			{
-				if(!Console()->LineIsValid(pOption->m_aCommand))
-				{
-					SendChatTarget(ClientId, "This TeeTycoon menu option is unavailable on the server.");
-					return;
-				}
-				if(str_startswith(pOption->m_aCommand, "tt_menu_action "))
-				{
-					const int64_t Now = Server()->Tick();
-					const int64_t MenuActionDelay = std::max(1, Server()->TickSpeed() / 2);
-					CPlayer *pPlayer = m_apPlayers[ClientId];
-					if(pPlayer->m_LastTeeTycoonMenuActionTick && Now < pPlayer->m_LastTeeTycoonMenuActionTick + MenuActionDelay)
-						return;
-					pPlayer->m_LastTeeTycoonMenuActionTick = Now;
-				}
-				Console()->ExecuteLine(pOption->m_aCommand, ClientId, false);
+				pSelected = &Option;
+				break;
+			}
+		}
+		if(!pSelected || pSelected->m_Command.empty())
+			return;
+		const char *pCommand = pSelected->m_Command.c_str();
+		if(str_startswith(pCommand, "page "))
+		{
+			using EPage = CPlayer::ETeeTycoonVotePage;
+			const char *pPage = pCommand + 5;
+			if(str_comp(pPage, "main") == 0)
+				pPlayer->m_TeeTycoonVotePage = EPage::MAIN;
+			else if(str_comp(pPage, "shop") == 0)
+				pPlayer->m_TeeTycoonVotePage = EPage::SHOP;
+			else if(str_comp(pPage, "pet") == 0)
+				pPlayer->m_TeeTycoonVotePage = EPage::PET;
+			else if(str_comp(pPage, "cosmetics") == 0)
+				pPlayer->m_TeeTycoonVotePage = EPage::COSMETICS;
+			else if(str_comp(pPage, "travel") == 0)
+				pPlayer->m_TeeTycoonVotePage = EPage::TRAVEL;
+			else if(str_comp(pPage, "account") == 0)
+				pPlayer->m_TeeTycoonVotePage = EPage::ACCOUNT;
+			else if(str_comp(pPage, "refresh") == 0)
+			{
+				// Keep the current category and rebuild its live status labels.
+			}
+			else
+				return;
+			RefreshTeeTycoonVoteMenu(ClientId);
+			return;
+		}
+		if(str_startswith(pCommand, "tt_menu_action "))
+		{
+			if(!Console()->LineIsValid(pCommand))
+			{
+				SendChatTarget(ClientId, "This TeeTycoon menu option is unavailable on the server.");
 				return;
 			}
-			break;
+			const int64_t Now = Server()->Tick();
+			const int64_t MenuActionDelay = std::max(1, Server()->TickSpeed() / 2);
+			if(pPlayer->m_LastTeeTycoonMenuActionTick && Now < pPlayer->m_LastTeeTycoonMenuActionTick + MenuActionDelay)
+				return;
+			pPlayer->m_LastTeeTycoonMenuActionTick = Now;
+			const std::string Command = pSelected->m_Command;
+			{
+				CClientChatLogger Logger(this, ClientId, log_get_scope_logger());
+				CLogScope Scope(&Logger);
+				Console()->ExecuteLine(Command.c_str(), ClientId, false);
+			}
+			if(m_apPlayers[ClientId] == pPlayer && Command != "tt_menu_action pet_follow" && Command != "tt_menu_action pet_stay")
+				RefreshTeeTycoonVoteMenu(ClientId);
+			return;
 		}
 	}
 
@@ -2454,6 +2532,8 @@ void CGameContext::OnCallVoteNetMessage(const CNetMsg_Cl_CallVote *pMsg, int Cli
 				// they must never start a public vote or expose private account data.
 				if(str_startswith(pOption->m_aCommand, "tt_menu_action ") || str_startswith(pOption->m_aCommand, "tt_menu_info "))
 				{
+					CClientChatLogger Logger(this, ClientId, log_get_scope_logger());
+					CLogScope Scope(&Logger);
 					Console()->ExecuteLine(pOption->m_aCommand, ClientId, false);
 					return;
 				}
@@ -2533,10 +2613,10 @@ void CGameContext::OnCallVoteNetMessage(const CNetMsg_Cl_CallVote *pMsg, int Cli
 
 		if(g_Config.m_SvVoteKickMin && !GetDDRaceTeam(ClientId))
 		{
-			const NETADDR *apAddresses[MAX_CLIENTS];
+			const NETADDR *apAddresses[MAX_CLIENTS] = {nullptr};
 			for(int i = 0; i < MAX_CLIENTS; i++)
 			{
-				if(m_apPlayers[i])
+				if(m_apPlayers[i] && !m_apPlayers[i]->m_IsBot)
 				{
 					apAddresses[i] = Server()->ClientAddr(i);
 				}
@@ -2544,12 +2624,12 @@ void CGameContext::OnCallVoteNetMessage(const CNetMsg_Cl_CallVote *pMsg, int Cli
 			int NumPlayers = 0;
 			for(int i = 0; i < MAX_CLIENTS; ++i)
 			{
-				if(m_apPlayers[i] && m_apPlayers[i]->GetTeam() != TEAM_SPECTATORS && !GetDDRaceTeam(i))
+				if(m_apPlayers[i] && !m_apPlayers[i]->m_IsBot && m_apPlayers[i]->GetTeam() != TEAM_SPECTATORS && !GetDDRaceTeam(i))
 				{
 					NumPlayers++;
 					for(int j = 0; j < i; j++)
 					{
-						if(m_apPlayers[j] && m_apPlayers[j]->GetTeam() != TEAM_SPECTATORS && !GetDDRaceTeam(j))
+						if(m_apPlayers[j] && !m_apPlayers[j]->m_IsBot && m_apPlayers[j]->GetTeam() != TEAM_SPECTATORS && !GetDDRaceTeam(j))
 						{
 							if(!net_addr_comp_noport(apAddresses[i], apAddresses[j]))
 							{
@@ -3077,12 +3157,8 @@ void CGameContext::OnStartInfoNetMessage(const CNetMsg_Cl_StartInfo *pMsg, int C
 	Server()->SetClientCountry(ClientId, pMsg->m_Country);
 	pPlayer->SetTeeInfos(pMsg->m_pSkin, pMsg->m_UseCustomColor, pMsg->m_ColorBody, pMsg->m_ColorFeet);
 
-	// send clear vote options
-	CNetMsg_Sv_VoteClearOptions ClearMsg;
-	Server()->SendPackMsg(&ClearMsg, MSGFLAG_VITAL, ClientId);
-
-	// begin sending vote options
-	pPlayer->m_SendVoteIndex = 0;
+	// Build this player's main page before the normal option batches are sent.
+	RefreshTeeTycoonVoteMenu(ClientId);
 
 	// send tuning parameters to client
 	SendTuningParams(ClientId, pPlayer->m_TuneZone);
@@ -3557,6 +3633,9 @@ void CGameContext::AddVote(const char *pDescription, const char *pCommand)
 
 	str_copy(pOption->m_aDescription, pDescription);
 	str_copy(pOption->m_aCommand, pCommand, Len + 1);
+	for(int ClientId = 0; ClientId < MAX_CLIENTS; ClientId++)
+		if(m_apPlayers[ClientId] && !m_apPlayers[ClientId]->m_IsBot)
+			RefreshTeeTycoonVoteMenu(ClientId);
 }
 
 void CGameContext::ConRemoveVote(IConsole::IResult *pResult, void *pUserData)
@@ -3624,6 +3703,9 @@ void CGameContext::ConRemoveVote(IConsole::IResult *pResult, void *pUserData)
 	pSelf->m_pVoteOptionFirst = pVoteOptionFirst;
 	pSelf->m_pVoteOptionLast = pVoteOptionLast;
 	pSelf->m_NumVoteOptions = NumVoteOptions;
+	for(int ClientId = 0; ClientId < MAX_CLIENTS; ClientId++)
+		if(pSelf->m_apPlayers[ClientId] && !pSelf->m_apPlayers[ClientId]->m_IsBot)
+			pSelf->RefreshTeeTycoonVoteMenu(ClientId);
 }
 
 void CGameContext::ConForceVote(IConsole::IResult *pResult, void *pUserData)
@@ -3721,6 +3803,9 @@ void CGameContext::ConClearVotes(IConsole::IResult *pResult, void *pUserData)
 		if(pPlayer)
 			pPlayer->m_SendVoteIndex = 0;
 	}
+	for(int ClientId = 0; ClientId < MAX_CLIENTS; ClientId++)
+		if(pSelf->m_apPlayers[ClientId] && !pSelf->m_apPlayers[ClientId]->m_IsBot)
+			pSelf->RefreshTeeTycoonVoteMenu(ClientId);
 }
 
 struct CMapNameItem
@@ -3966,6 +4051,12 @@ void CGameContext::RegisterDDRaceCommands()
 	Console()->Register("tt_start_event_dm", "", CFGFLAG_SERVER, ConStartEventDm, this, "Start a TeeTycoon deathmatch event");
 	Console()->Register("tt_start_event_freezerace", "", CFGFLAG_SERVER, ConStartEventFreezeRace, this, "Start a TeeTycoon freeze-race event");
 	Console()->Register("tt_start_event_fng", "", CFGFLAG_SERVER, ConStartEventFng, this, "Start a TeeTycoon FNG event");
+	Console()->Register("tt_blocker_slot", "", CFGFLAG_SERVER, ConBlockerSlot, this, "Spawn a blocker that counts as a server client");
+	Console()->Register("tt_blocker_virtual", "", CFGFLAG_SERVER, ConBlockerVirtual, this, "Spawn a blocker without using a connection slot");
+	Console()->Register("tt_blocker_remove", "i[id]", CFGFLAG_SERVER, ConBlockerRemove, this, "Remove a blocker by internal ID");
+	Console()->Register("tt_blocker_list", "", CFGFLAG_SERVER, ConBlockerList, this, "List active blockers and their modes");
+	Console()->Register("tt_blocker_whitelist", "i[id] s[add|remove|list] ?s[in-game name]", CFGFLAG_SERVER, ConBlockerWhitelist, this, "Manage one blocker's protected in-game names");
+	Console()->Register("tt_blocker_freeze_timeout", "i[id] i[seconds]", CFGFLAG_SERVER, ConBlockerFreezeTimeout, this, "Set a blocker's frozen respawn time (0 disables)");
 	Console()->Register("kill_pl", "v[id] ?r[reason]", CFGFLAG_SERVER, ConKillPlayer, this, "Kills a player and announces the kill");
 	Console()->Register("totele", "i[number]", CFGFLAG_SERVER | CMDFLAG_TEST, ConToTeleporter, this, "Teleports you to teleporter i");
 	Console()->Register("totelecp", "i[number]", CFGFLAG_SERVER | CMDFLAG_TEST, ConToCheckTeleporter, this, "Teleports you to checkpoint teleporter i");
@@ -4056,6 +4147,10 @@ void CGameContext::RegisterChatCommands()
 	Console()->Register("home", "?i[home number]", CFGFLAG_CHAT | CFGFLAG_SERVER, ConHome, this, "Travel to your house");
 	Console()->Register("spawn", "", CFGFLAG_CHAT | CFGFLAG_SERVER, ConSpawn, this, "Travel to spawn");
 	Console()->Register("pet_spawn", "", CFGFLAG_CHAT | CFGFLAG_SERVER, ConPetSpawn, this, "Spawn your pet");
+	Console()->Register("pet_upgrade", "s[race|blocker|defense|helper|aim]", CFGFLAG_CHAT | CFGFLAG_SERVER, ConPetUpgrade, this, "Upgrade one of your pet's five skills");
+	Console()->Register("pet_relation", "s[help|block|neutral] s[in-game name]", CFGFLAG_CHAT | CFGFLAG_SERVER, ConPetRelation, this, "Set which in-game names your pet rescues or blocks");
+	Console()->Register("pet_relations", "", CFGFLAG_CHAT | CFGFLAG_SERVER, ConPetRelations, this, "List your pet's help and block targets");
+	Console()->Register("pet_freeze_timeout", "i[seconds: 0 or 1-120]", CFGFLAG_CHAT | CFGFLAG_SERVER, ConPetFreezeTimeout, this, "Seconds before a frozen pet respawns; 0 disables it");
 	Console()->Register("join", "", CFGFLAG_CHAT | CFGFLAG_SERVER, ConJoinEvent, this, "Join the current event");
 	Console()->Register("event_join", "", CFGFLAG_CHAT | CFGFLAG_SERVER, ConJoinEvent, this, "Join the current TeeTycoon event");
 	Console()->Register("profile", "?s[player name]", CFGFLAG_CHAT | CFGFLAG_SERVER, ConProfile, this, "Display a player profile");
@@ -4063,6 +4158,7 @@ void CGameContext::RegisterChatCommands()
 	Console()->Register("invite", "s[player name]", CFGFLAG_CHAT | CFGFLAG_SERVER, ConInviteHouse, this, "Invite a player to your house");
 	Console()->Register("accept", "", CFGFLAG_CHAT | CFGFLAG_SERVER, ConAccept, this, "Accept a house invitation");
 	Console()->Register("decline", "", CFGFLAG_CHAT | CFGFLAG_SERVER, ConDecline, this, "Decline a house invitation");
+	Console()->Register("leave_house", "", CFGFLAG_CHAT | CFGFLAG_SERVER, ConLeaveHouse, this, "Return from a house visit");
 	Console()->Register("unrainbow", "", CFGFLAG_CHAT | CFGFLAG_SERVER, ConUnRainbow, this, "Remove your rainbow effect");
 	Console()->Register("unbloody", "", CFGFLAG_CHAT | CFGFLAG_SERVER, ConUnBloody, this, "Remove your bloody effect");
 	Console()->Register("emote", "?s[emote name] i[duration in seconds]", CFGFLAG_CHAT | CFGFLAG_SERVER, ConEyeEmote, this, "Sets your tee's eye emote");
@@ -4105,12 +4201,6 @@ void CGameContext::RegisterChatCommands()
 	Console()->Register("top5points", "?i[number]", CFGFLAG_CHAT | CFGFLAG_SERVER, ConTopPoints, this, "Shows five points of the global point ladder beginning with rank i (1 by default)");
 	Console()->Register("timecp", "?r[player name]", CFGFLAG_CHAT | CFGFLAG_SERVER, ConTimeCP, this, "Set your checkpoints based on another player");
 
-	Console()->Register("team", "?i[id]", CFGFLAG_CHAT | CFGFLAG_SERVER, ConTeam, this, "Lets you join team i (shows your team if left blank)");
-	Console()->Register("lock", "?i['0'|'1']", CFGFLAG_CHAT | CFGFLAG_SERVER, ConLock, this, "Toggle team lock so no one else can join and so the team restarts when a player dies. /lock 0 to unlock, /lock 1 to lock");
-	Console()->Register("unlock", "", CFGFLAG_CHAT | CFGFLAG_SERVER, ConUnlock, this, "Unlock a team");
-	Console()->Register("team_invite", "r[player name]", CFGFLAG_CHAT | CFGFLAG_SERVER, ConInvite, this, "Invite a person to a locked team");
-	Console()->Register("join", "r[player name]", CFGFLAG_CHAT | CFGFLAG_SERVER, ConJoin, this, "Join the team of the specified player");
-	Console()->Register("team0mode", "?i['0'|'1']", CFGFLAG_CHAT | CFGFLAG_SERVER, ConTeam0Mode, this, "Toggle team between team 0 and team mode. This mode will make your team behave like team 0.");
 
 	Console()->Register("showothers", "?i['0'|'1'|'2']", CFGFLAG_CHAT | CFGFLAG_SERVER, ConShowOthers, this, "Whether to show players from other teams or not (off by default), optional i = 0 for off, i = 1 for on, i = 2 for own team only");
 	Console()->Register("showall", "?i['0'|'1']", CFGFLAG_CHAT | CFGFLAG_SERVER, ConShowAll, this, "Whether to show players at any distance (off by default), optional i = 0 for off else for on");
@@ -4179,6 +4269,64 @@ void CGameContext::OnInit(const void *pPersistentData)
 	m_pEngine = Kernel()->RequestInterface<IEngine>();
 	m_pStorage = Kernel()->RequestInterface<IStorage>();
 	m_pAntibot = Kernel()->RequestInterface<IAntibot>();
+	int DbResult = sqlite3_open("Accounts.sqlite", &db);
+	if(DbResult == SQLITE_OK)
+	{
+		const char *pAccountSchema = "CREATE TABLE IF NOT EXISTS ACCOUNTS (ID INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, NAME TEXT NOT NULL, PASSWORD TEXT NOT NULL, RANK INTEGER NOT NULL, MONEY INTEGER NOT NULL, LEVEL INTEGER NOT NULL, EXP INTEGER NOT NULL, HOUSE INTEGER NOT NULL, VIP INTEGER NOT NULL, REBIRTH INTEGER NOT NULL);";
+		const char *pBotSchema = "CREATE TABLE IF NOT EXISTS BOTS (ID INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, OWNER_NAME TEXT NOT NULL, NAME TEXT NOT NULL, LEVEL INTEGER NOT NULL, EXP INTEGER NOT NULL, HEALTH INTEGER NOT NULL, ARMOR INTEGER NOT NULL, WEAPON INTEGER NOT NULL, KILLS INTEGER NOT NULL, SKILL_RACE INTEGER NOT NULL DEFAULT 1, SKILL_BLOCKER INTEGER NOT NULL DEFAULT 1, SKILL_DEFENSE INTEGER NOT NULL DEFAULT 1, SKILL_HELPER INTEGER NOT NULL DEFAULT 1, SKILL_AIM INTEGER NOT NULL DEFAULT 1, FREEZE_RESPAWN_SECONDS INTEGER NOT NULL DEFAULT 10);";
+		char *pError = nullptr;
+		DbResult = sqlite3_exec(db, pAccountSchema, nullptr, nullptr, &pError);
+		if(DbResult == SQLITE_OK)
+			DbResult = sqlite3_exec(db, pBotSchema, nullptr, nullptr, &pError);
+		// Existing account databases predate the skill columns. Add only missing
+		// columns so bought pets and their other saved progress remain intact.
+		if(DbResult == SQLITE_OK)
+		{
+			bool aHasSkill[NUM_PET_SKILLS] = {};
+			bool HasFreezeTimeout = false;
+			sqlite3_stmt *pColumns = nullptr;
+			DbResult = sqlite3_prepare_v2(db, "PRAGMA table_info(BOTS)", -1, &pColumns, nullptr);
+			if(DbResult == SQLITE_OK)
+			{
+				while(sqlite3_step(pColumns) == SQLITE_ROW)
+				{
+					const char *pName = reinterpret_cast<const char *>(sqlite3_column_text(pColumns, 1));
+					for(int Skill = 0; Skill < NUM_PET_SKILLS; Skill++)
+						if(pName && str_comp(pName, PET_SKILL_COLUMNS[Skill]) == 0)
+							aHasSkill[Skill] = true;
+					if(pName && str_comp(pName, "FREEZE_RESPAWN_SECONDS") == 0)
+						HasFreezeTimeout = true;
+				}
+			}
+			sqlite3_finalize(pColumns);
+			for(int Skill = 0; DbResult == SQLITE_OK && Skill < NUM_PET_SKILLS; Skill++)
+			{
+				if(aHasSkill[Skill])
+					continue;
+				char aSql[128];
+				str_format(aSql, sizeof(aSql), "ALTER TABLE BOTS ADD COLUMN %s INTEGER NOT NULL DEFAULT 1", PET_SKILL_COLUMNS[Skill]);
+					DbResult = sqlite3_exec(db, aSql, nullptr, nullptr, &pError);
+			}
+			if(DbResult == SQLITE_OK && !HasFreezeTimeout)
+				DbResult = sqlite3_exec(db, "ALTER TABLE BOTS ADD COLUMN FREEZE_RESPAWN_SECONDS INTEGER NOT NULL DEFAULT 10", nullptr, nullptr, &pError);
+			if(DbResult == SQLITE_OK)
+				DbResult = sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS PET_RELATIONS (OWNER_NAME TEXT NOT NULL, TARGET_NAME TEXT NOT NULL, RELATION INTEGER NOT NULL, PRIMARY KEY (OWNER_NAME, TARGET_NAME))", nullptr, nullptr, &pError);
+		}
+		if(DbResult != SQLITE_OK)
+		{
+			dbg_msg("teetycoon-db", "Failed to initialize account tables: %s", pError ? pError : sqlite3_errmsg(db));
+			sqlite3_free(pError);
+			sqlite3_close(db);
+			db = nullptr;
+		}
+	}
+	else
+	{
+		dbg_msg("teetycoon-db", "Failed to open Accounts.sqlite: %s", db ? sqlite3_errmsg(db) : "unknown SQLite error");
+		if(db)
+			sqlite3_close(db);
+		db = nullptr;
+	}
 	m_World.SetGameServer(this);
 	m_Events.SetGameServer(this);
 	m_PlayerMapping.Init(this);
@@ -4648,6 +4796,9 @@ void CGameContext::OnShutdown(void *pPersistentData)
 
 	// Stop any demos being recorded.
 	Server()->StopDemos();
+	for(int BotId = MAX_CLIENTS - 1; BotId >= 0; BotId--)
+		if(m_apPlayers[BotId] && m_apPlayers[BotId]->m_IsBot)
+			DeleteBot(BotId);
 
 	DeleteTempfile();
 	ConfigManager()->ResetGameSettings();
@@ -5535,12 +5686,7 @@ void CGameContext::OnClientRejoin(int ClientId)
 	SendStartMessages(ClientId);
 	SendSettings(ClientId);
 
-	// send clear vote options
-	CNetMsg_Sv_VoteClearOptions ClearMsg;
-	Server()->SendPackMsg(&ClearMsg, MSGFLAG_VITAL, ClientId);
-
-	// begin sending vote options
-	m_apPlayers[ClientId]->m_SendVoteIndex = 0;
+	RefreshTeeTycoonVoteMenu(ClientId);
 	SendTuningParams(ClientId, m_apPlayers[ClientId]->m_TuneZone);
 }
 

@@ -1074,6 +1074,12 @@ void CCharacter::Die(int Killer, int Weapon, bool SendKillMsg)
 
 bool CCharacter::TakeDamage(vec2 Force, int Dmg, int From, int Weapon)
 {
+	if((((Weapon == WEAPON_GRENADE || Weapon == WEAPON_SHOTGUN) && length(Force) > 0.5f) ||
+		(g_Config.m_SvBotDamageMode && Dmg > 0)) &&
+		From >= 0 && From < MAX_CLIENTS && From != GetPlayer()->GetCid() &&
+		GameServer()->m_apPlayers[From] && !GameServer()->m_apPlayers[From]->m_IsBot &&
+		GameServer()->m_apPlayers[From]->GetCharacter())
+		GameServer()->OnProtectedPlayerHurt(GetPlayer()->GetCid(), From, Dmg > 0);
 	if(Dmg)
 	{
 		SetEmote(EMOTE_PAIN, Server()->Tick() + 500 * Server()->TickSpeed() / 1000);

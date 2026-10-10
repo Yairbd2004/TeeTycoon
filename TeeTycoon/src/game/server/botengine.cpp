@@ -129,6 +129,7 @@ CBotEngine::CBotEngine(CGameContext *pGameServer)
 
 void CBotEngine::Free()
 {
+	m_vTeleEntrances.clear();
 	if(m_pGrid)
 		std::free(m_pGrid);
 	m_pGrid = nullptr;
@@ -187,11 +188,22 @@ void CBotEngine::Init(CTile *pTiles, int Width, int Height)
 	m_Height = Height;
 
 	Free();
+	if(GameServer()->Collision()->TeleLayer())
+	{
+		for(int Index = 0; Index < Width * Height; ++Index)
+		{
+			int Number = GameServer()->Collision()->IsTeleport(Index);
+			if(!Number)
+				Number = GameServer()->Collision()->IsEvilTeleport(Index);
+			if(Number > 0 && !GameServer()->Collision()->TeleOuts(Number - 1).empty())
+				m_vTeleEntrances.push_back({ConvertIndex(Index), Number});
+		}
+	}
 
 	m_pGrid = (int *)std::malloc(m_Width * m_Height * sizeof(int));
 	if(m_pGrid)
 	{
-		mem_zero(m_pGrid, m_Width * m_Height * sizeof(char));
+		mem_zero(m_pGrid, m_Width * m_Height * sizeof(int));
 
 		int j = m_Height - 1;
 		int Margin = 6;
@@ -648,8 +660,14 @@ void CBotEngine::GenerateTriangles()
 		}
 	}
 	dbg_msg("botengine", "Found %d corners", CornerCount);
-	m_Triangulation.m_pTriangles = (CTriangulation::CTriangleData *)std::malloc(2 * CornerCount * sizeof(CTriangulation::CTriangleData));
-	vec2 *Corners = (vec2 *)std::malloc((CornerCount + 3) * sizeof(vec2));
+	const int CandidateCount = CornerCount;
+	vec2 *Corners = (vec2 *)std::malloc((CandidateCount + 3) * sizeof(vec2));
+	if(!Corners || CandidateCount < 3)
+	{
+		std::free(Corners);
+		m_Triangulation.m_Size = 0;
+		return;
+	}
 	int m = 0;
 	for(int i = 1; i < m_Width - 1; i++)
 	{
@@ -667,6 +685,50 @@ void CBotEngine::GenerateTriangles()
 			if(g_IsInnerCorner[n] || g_IsOuterCorner[n])
 				Corners[m++] = vec2(i, j);
 		}
+	}
+	// The triangulation below checks corner triples and scans other corners for
+	// every candidate triangle. Keep a spatially spread sample so larger maps do
+	// not block the game thread for minutes the first time a pet is spawned.
+	constexpr int MAX_NAVIGATION_CORNERS = 64;
+	if(CornerCount > MAX_NAVIGATION_CORNERS)
+	{
+		std::vector<vec2> SampledCorners;
+		std::vector<float> NearestDistance(CornerCount, 1e30f);
+		std::vector<bool> Selected(CornerCount, false);
+		SampledCorners.reserve(MAX_NAVIGATION_CORNERS);
+		int SelectedIndex = 0;
+		while(SelectedIndex >= 0 && static_cast<int>(SampledCorners.size()) < MAX_NAVIGATION_CORNERS)
+		{
+			Selected[SelectedIndex] = true;
+			const vec2 SelectedCorner = Corners[SelectedIndex];
+			SampledCorners.push_back(SelectedCorner);
+			for(int Candidate = 0; Candidate < CornerCount; Candidate++)
+			{
+				const float dx = Corners[Candidate].x - SelectedCorner.x;
+				const float dy = Corners[Candidate].y - SelectedCorner.y;
+				NearestDistance[Candidate] = std::min(NearestDistance[Candidate], dx * dx + dy * dy);
+			}
+			SelectedIndex = -1;
+			float FarthestDistance = -1.0f;
+			for(int Candidate = 0; Candidate < CornerCount; Candidate++)
+			{
+				if(!Selected[Candidate] && NearestDistance[Candidate] > FarthestDistance)
+				{
+					FarthestDistance = NearestDistance[Candidate];
+					SelectedIndex = Candidate;
+				}
+			}
+		}
+		std::copy(SampledCorners.begin(), SampledCorners.end(), Corners);
+		CornerCount = static_cast<int>(SampledCorners.size());
+		dbg_msg("botengine", "Reduced navigation corners from %d to %d", CandidateCount, CornerCount);
+	}
+	m_Triangulation.m_pTriangles = (CTriangulation::CTriangleData *)std::malloc(2 * CornerCount * sizeof(CTriangulation::CTriangleData));
+	if(!m_Triangulation.m_pTriangles)
+	{
+		std::free(Corners);
+		m_Triangulation.m_Size = 0;
+		return;
 	}
 	vec2 BL = Corners[0], TR = Corners[0];
 	for(int i = 1; i < CornerCount; i++)
@@ -884,10 +946,24 @@ int CBotEngine::FastIntersectLine(int Id1, int Id2)
 
 void CBotEngine::GetPath(vec2 VStart, vec2 VEnd, CPath *pPath)
 {
+	if(!HasRoute(VStart, VEnd))
+	{
+		pPath->m_Size = 0;
+		return;
+	}
 	pPath->m_Size = m_Graph.GetPath(GetClosestVertex(VStart), GetClosestVertex(VEnd), pPath->m_pVertices + 1);
 	pPath->m_pVertices[0] = VStart;
 	pPath->m_pVertices[pPath->m_Size + 1] = VEnd;
 	pPath->m_Size = pPath->m_Size + 2;
+}
+
+bool CBotEngine::HasRoute(vec2 VStart, vec2 VEnd)
+{
+	if(m_Graph.m_NumVertices <= 0 || !m_Graph.m_pVertices || !m_Graph.m_pClosestPath)
+		return false;
+	const int Start = GetClosestVertex(VStart);
+	const int End = GetClosestVertex(VEnd);
+	return Start == End || m_Graph.m_pClosestPath[Start + End * m_Graph.m_NumVertices] >= 0;
 }
 
 int CBotEngine::GetPartialPath(vec2 Pos, vec2 Target, vec2 *pVertices, int MaxSize)

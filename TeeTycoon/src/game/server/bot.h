@@ -5,9 +5,14 @@
 
 #include "gamecontext.h"
 #include "botengine.h"
+#include "bot_ai/skills.h"
 
 #include "ai/genetics.h"
 #include "ai/strategy.h"
+
+#include <string>
+#include <unordered_set>
+#include <vector>
 
 const int g_aBotPriority[MAX_CLIENTS][8] = {
 	{0,0,0,0,0,0,0,1},
@@ -82,6 +87,8 @@ protected:
 		bool m_NeedUpdate;
 		int m_StartTick;
 	} m_ComputeTarget;
+	vec2 m_LastPathTargetPos = vec2(0, 0);
+	bool m_HasPathTarget = false;
 
 	class CGenetics m_Genetics;
 	int m_aTargetOrder[CTarget::NUM_TARGETS];
@@ -112,6 +119,11 @@ protected:
 	void HandleHook(bool SeeTarget);
 	void UpdateEdge();
 	void MakeChoice(bool UseTarget);
+	int Skill(EPetSkill SkillId) const;
+	bool IsDangerous(vec2 Pos);
+	void ApplyMovementSkills();
+	bool DefendAgainstUpwardThrow();
+	bool FindBounceAim(vec2 Target, vec2 *pAim);
 
 	int GetTile(int x, int y) { return BotEngine()->GetTile(x/32,y/32);}
 
@@ -133,6 +145,75 @@ public:
 	int owner;
 	bool stay;
 	bool stuck;
+	bool m_Rescuing = false;
+	bool m_Fighting = false;
+	int m_ThreatUntilTick = 0;
+	std::unordered_set<std::string> m_HelpNames;
+	std::unordered_set<std::string> m_BlockNames;
+	int m_FreezeRespawnSeconds = 10;
+	int m_FrozenSinceTick = -1;
+	bool m_RespawnFromFreeze = false;
+	bool m_RaceToFrozenOwner = false;
+	int m_LastTeleSearchTick = -1;
+	vec2 m_TeleTarget = vec2(0, 0);
+	bool m_HasTeleTarget = false;
+	bool m_UsingLocalRoute = false;
+	int m_LastRescuePlanTick = -1;
+	int m_RescueTargetId = -1;
+	vec2 m_RescueWaypoint = vec2(0, 0);
+	vec2 m_RescueVantage = vec2(0, 0);
+	vec2 m_LastRescueTargetPos = vec2(0, 0);
+	bool m_HasRescueRoute = false;
+	int m_RescueCandidateOffset = 0;
+	vec2 m_RescueProgressPos = vec2(0, 0);
+	int m_RescueProgressTick = -1;
+	int m_LastLocalPlanTick = -1;
+	int m_LocalTargetId = -1;
+	vec2 m_LocalWaypoint = vec2(0, 0);
+	vec2 m_LastLocalTargetPos = vec2(0, 0);
+	bool m_HasLocalPath = false;
+	bool m_NoSafeRoute = false;
+	int m_LastFreezeCrossPlanTick = -1;
+	int m_FreezeCrossUntilTick = -1;
+	int m_FreezeCrossDirection = 0;
+	int m_FreezeCrossJump = 0;
+	int m_FreezeCrossHook = 0;
+	vec2 m_FreezeCrossAim = vec2(0, -1);
+	vec2 m_FreezeCrossGoal = vec2(0, 0);
+	int m_BlockFreezeTargetId = -1;
+	int m_LastBlockPlanTick = -1;
+	vec2 m_BlockFreezeGoal = vec2(0, 0);
+	vec2 m_BlockStance = vec2(0, 0);
+	vec2 m_BlockWaypoint = vec2(0, 0);
+	vec2 m_LastBlockTargetPos = vec2(0, 0);
+	int m_LastBlockStancePlanTick = -1;
+	bool m_HasBlockFreezeGoal = false;
+	bool m_HasBlockStance = false;
+	vec2 m_LastProgressPos = vec2(0, 0);
+	int m_LastProgressTick = -1;
+	vec2 m_LastGoalProgressTarget = vec2(0, 0);
+	float m_LastGoalProgressDistance = 1e30f;
+	int m_LastGoalProgressTick = -1;
+	int m_LastRouteRefreshTick = -1;
+	bool m_TriedWallJump = false;
+	int m_LastWallHookPlanTick = -1;
+	bool CanUseWeapon(int Weapon) const;
+	bool CanHammerHit(CCharacter *pTarget);
+	bool FindLocalRoute(vec2 Start, vec2 Goal, vec2 *pWaypoint);
+	bool FindRescueRoute(int TargetId, vec2 TargetPos, vec2 *pWaypoint);
+	bool SafeTravelSegment(vec2 Start, vec2 End);
+	bool HasFreezeBelow(vec2 Pos, float MaxDistance);
+	bool IsFreezeAt(vec2 Pos);
+	bool IsInFreezeFootprint(vec2 Pos);
+	bool IsDeathAt(vec2 Pos);
+	bool FindSafeFreezeCrossing(vec2 Goal, int *pDirection, int *pJump, int *pHook, vec2 *pAim);
+	bool FindBlockFreezeGoal(vec2 TargetPos, int RemainingFreezeTicks, vec2 *pGoal, bool *pSupported);
+	bool FindBlockStance(vec2 MyPos, vec2 TargetPos, vec2 FreezeGoal, vec2 *pStance, vec2 *pWaypoint);
+	bool ShouldHoldEnemyHook(const CCharacter *pTarget, vec2 FreezeGoal);
+	void OnSkillUpgrade();
+	bool IsHelpTarget(const CPlayer *pTarget, int TargetId) const;
+	bool IsBlockTarget(const CPlayer *pTarget, int TargetId) const;
+	void NotifyProtectedPlayerHurt(int VictimId, int EnemyId, bool DealtDamage);
 	void checkStuck(bool inSight);
 	void emote();
 	int GetID() { return m_SnapID; }

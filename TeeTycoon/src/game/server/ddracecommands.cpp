@@ -1435,6 +1435,8 @@ void CGameContext::SetTeamInvite(int id, int inviteID)
 
 void CGameContext::Teleport(CCharacter *pChr, vec2 Pos)
 {
+	if(!pChr || (pChr->GetPlayer()->m_IsBot && IsBotFrozen(pChr)))
+		return;
 	pChr->SetPosition(Pos);
 	pChr->m_Pos = Pos;
 	pChr->m_PrevPos = Pos;

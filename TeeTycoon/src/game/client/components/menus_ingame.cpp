@@ -1026,8 +1026,9 @@ void CMenus::RenderServerControl(CUIRect MainView)
 			if(0 <= m_CallvoteSelectedOption && m_CallvoteSelectedOption < GameClient()->m_Voting.NumOptions())
 			{
 				GameClient()->m_Voting.CallvoteOption(m_CallvoteSelectedOption, m_CallvoteReasonInput.GetString());
-				if(g_Config.m_UiCloseWindowAfterChangingSetting)
-					SetActive(false);
+				// The server may replace the vote list with a category page. Keep the
+				// menu open and clear the old selection so it cannot activate a new row.
+				m_CallvoteSelectedOption = -1;
 			}
 		}
 		else if(s_ControlPage == EServerControlTab::KICKVOTE)

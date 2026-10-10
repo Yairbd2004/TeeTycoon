@@ -4,6 +4,7 @@
 #define GAME_SERVER_PLAYER_H
 
 #include "teeinfo.h"
+#include "bot_ai/skills.h"
 
 #include <base/vmath.h>
 
@@ -16,6 +17,8 @@
 
 #include <memory>
 #include <optional>
+#include <string>
+#include <vector>
 
 enum { RAINBOW_NONE = 0, RAINBOW_COLOR = 1, RAINBOW_BLACKWHITE = 2 };
 
@@ -32,6 +35,23 @@ class CPlayer
 	MACRO_ALLOC_POOL_ID()
 
 public:
+	enum class ETeeTycoonVotePage
+	{
+		MAIN,
+		SHOP,
+		PET,
+		COSMETICS,
+		TRAVEL,
+		ACCOUNT,
+	};
+	struct CTeeTycoonVoteOption
+	{
+		std::string m_Description;
+		std::string m_Command;
+	};
+	ETeeTycoonVotePage m_TeeTycoonVotePage = ETeeTycoonVotePage::MAIN;
+	std::vector<CTeeTycoonVoteOption> m_vTeeTycoonVoteOptions;
+
 	CPlayer(CGameContext *pGameServer, uint32_t UniqueClientId, int ClientId, int Team);
 	~CPlayer();
 
@@ -83,6 +103,7 @@ public:
 	int health = 0;
 	int armor = 0;
 	int weaponBot = 0;
+	int m_aPetSkills[NUM_PET_SKILLS] = {1, 1, 1, 1, 1};
 	int kills = 0;
 	int exp = 0;
 	int vip = 0;
@@ -102,6 +123,7 @@ public:
 	bool m_Authed = false;
 	// Bot flag
 	bool m_IsBot = false;
+	bool m_IsBlocker = false;
 	bool to_fire = false;
 	bool m_ownBot = false;
 	int botId = -1;
@@ -113,7 +135,10 @@ public:
 	bool invited = false;
 	int inviteID = -1;
 	int inviteTick = 0;
-	void inviteThread();
+	int m_HouseVisitHost = -1;
+	int m_HouseReturnTeam = 0;
+	vec2 m_HouseReturnPos = vec2(0, 0);
+	bool m_HouseReturnPending = false;
 
 	bool IsBot() { return m_IsBot; }
 	// this is used for snapping so we know how we can clip the view for the player

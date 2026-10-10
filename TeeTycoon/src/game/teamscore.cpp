@@ -17,12 +17,21 @@ bool CTeamsCore::SameTeam(int ClientId1, int ClientId2) const
 
 int CTeamsCore::Team(int ClientId) const
 {
+	if(ClientId < 0 || ClientId >= MAX_CLIENTS)
+	{
+		dbg_msg("teams", "Ignoring team query for invalid client id %d", ClientId);
+		return TEAM_FLOCK;
+	}
 	return m_aTeam[ClientId];
 }
 
 void CTeamsCore::Team(int ClientId, int Team)
 {
-	dbg_assert(Team >= TEAM_FLOCK && Team < NUM_DDRACE_TEAMS, "Invalid Team: %d", Team);
+	if(ClientId < 0 || ClientId >= MAX_CLIENTS || Team < TEAM_FLOCK || Team >= NUM_DDRACE_TEAMS)
+	{
+		dbg_msg("teams", "Ignoring invalid team update: client=%d team=%d", ClientId, Team);
+		return;
+	}
 	m_aTeam[ClientId] = Team;
 }
 

@@ -56,27 +56,104 @@ Windows is the platform on which the current port was compiled. A compatible new
    ```powershell
    $env:RUSTUP_TOOLCHAIN = "1.85.0"
    $pythonExe = (Get-Command python).Source
-   cmake -S TeeTycoon -B TeeTycoon/out/build/20.1.1-msvc -G Ninja `
+   cmake -S TeeTycoon -B 'TeeTycoon/out/build/TeeTycoon Server' -G Ninja `
      -DCMAKE_BUILD_TYPE=Debug -DCLIENT=OFF -DSERVER=ON -DPREFER_BUNDLED_LIBS=ON `
      -DPython3_EXECUTABLE="$pythonExe" -DDOWNLOAD_GTEST=OFF `
      -DRUST_RUSTC="$env:USERPROFILE\.rustup\toolchains\1.85.0-x86_64-pc-windows-msvc\bin\rustc.exe" `
      -DRUST_CARGO="$env:USERPROFILE\.rustup\toolchains\1.85.0-x86_64-pc-windows-msvc\bin\cargo.exe"
-   cmake --build TeeTycoon/out/build/20.1.1-msvc --target game-server
+   cmake --build 'TeeTycoon/out/build/TeeTycoon Server' --target game-server
    ```
 
-   The server binary is `TeeTycoon/out/build/20.1.1-msvc/DDNet-Server.exe`. CMake stages `storage.cfg` beside it and the tracked `data/` files, including `autoexec_server.cfg` and `myServerconfig.cfg`, into the build's `data` directory on configure. The two TeeTycoon server configs are configure dependencies, so changing them causes CMake to refresh the staged copies on the next build.
+   The server binary is `TeeTycoon/out/build/TeeTycoon Server/DDNet-Server.exe`. CMake stages `storage.cfg` beside it and the tracked `data/` files, including `autoexec_server.cfg` and `myServerconfig.cfg`, into the build's `data` directory on configure. The two TeeTycoon server configs are configure dependencies, so changing them causes CMake to refresh the staged copies on the next build.
 7. To compile the client/editor too, use a separate build directory:
 
    ```powershell
-   cmake -S TeeTycoon -B TeeTycoon/out/build/20.1.1-client-msvc -G Ninja `
+   cmake -S TeeTycoon -B 'TeeTycoon/out/build/TeeTycoon Client' -G Ninja `
      -DCMAKE_BUILD_TYPE=Debug -DCLIENT=ON -DSERVER=OFF -DPREFER_BUNDLED_LIBS=ON `
      -DPython3_EXECUTABLE="$pythonExe" -DDOWNLOAD_GTEST=OFF
-   cmake --build TeeTycoon/out/build/20.1.1-client-msvc --target game-client
+   cmake --build 'TeeTycoon/out/build/TeeTycoon Client' --target game-client
    ```
 
-   The client binary is `TeeTycoon/out/build/20.1.1-client-msvc/DDNet.exe`.
+   The client binary is `TeeTycoon/out/build/TeeTycoon Client/DDNet.exe`.
 
-Use a new versioned build directory when changing DDNet versions or toolchains. `out/` is ignored by Git and keeps generated files separate from source. CMake 3.22.1, Ninja 1.10.2, and Python 3.12.14 were used for the current builds. CMake may download build-time dependencies on the first configure, so allow network access. `DOWNLOAD_GTEST=OFF` avoids downloading the optional test dependency when only building the server/client.
+Keep only `TeeTycoon Server` and `TeeTycoon Client` under `TeeTycoon/out/build/`, and rebuild in those same directories after source changes. If a DDNet or toolchain update requires a clean configure, preserve the server's runtime database and local data first, then recreate the same two directories. This checkout is for development; if its server is running when updating the build, close that process and rebuild in place. `out/` is ignored by Git and keeps generated files separate from source. CMake 3.22.1, Ninja 1.10.2, and Python 3.12.14 were used for the current builds. CMake may download build-time dependencies on the first configure, so allow network access. `DOWNLOAD_GTEST=OFF` avoids downloading the optional test dependency when only building the server/client.
+
+Pets spawn as virtual bots outside the human connection slots. An admin can use
+`tt_blocker_slot` to spawn a blocker that takes a connection slot or
+`tt_blocker_virtual` to spawn one without a connection slot; `tt_blocker_list`
+shows their IDs and `tt_blocker_remove <id>` removes one. Players can use
+`/invite <player>`, `/accept`, and `/decline` for house visits. A guest can use
+`/leave_house` or the Travel vote to return to their previous position and
+DDRace team. House travel also moves each player's pet into that team. Players
+cannot use the regular DDRace team management chat commands; admins retain
+`set_team_ddr` through the server console.
+
+Pet owners can use `/pet_relation help <in-game name>`,
+`/pet_relation block <in-game name>`, or
+`/pet_relation neutral <in-game name>` to save the player names their pet helps
+or blocks. Names are matched exactly against the name shown in-game, including
+players who are not logged in; quote names containing spaces. The player can
+be offline when added. A renamed player needs a new list entry.
+Entries saved by the earlier account-name version should be replaced if that
+account name differs from the player's in-game name.
+`/pet_relations` lists the entries. The pet always helps its owner; other
+targets must be nearby and in the same DDRace team. `/pet_freeze_timeout <seconds>`
+sets how long a continuously frozen pet waits before respawning (default 10,
+valid 1-120, or 0 to disable). The My Pet vote page shows the current setting
+and offers common values. A frozen bot cannot use a server-driven follow or
+house teleport to escape freeze. After respawning, a pet returns to an unfrozen
+owner; for a frozen owner it searches a map path, including reachable teleporter
+entrances. Map pathing and bot combat still need live gameplay checks.
+
+When a safe route is unavailable, level-9+ Race and Defense pets evaluate
+short freeze crossings with the DDNet movement core and only attempt one if
+the predicted momentum carries them out to safe ground. A pet already frozen
+cannot move or hook; its configured timeout respawns it at an unfrozen owner.
+For combat, pets keep pursuing a frozen target that is off a freeze tile, but
+do not fire an unfreezing weapon at it. They select nearby freeze tiles,
+prefer supported tiles that can hold the target in freeze, and release a
+player hook if the projected pull moves the target away from that tile.
+These movement and combat decisions still need gameplay checks on the map.
+
+Gun and laser hits with no damage do not make a protected player an attack
+target. Shotgun knockback and grenade force do. The optional server setting
+`sv_bot_damage_mode 1` also treats positive weapon damage as aggression; if
+the damaged player owns a pet, the attacker's current in-game name is saved
+to that pet's block list. This setting changes pet retaliation and does not
+turn on a separate damage game mode.
+
+Admin blockers use maximum bot skill levels. In RCON, use
+`tt_blocker_whitelist <id> add <in-game name>`, `remove <in-game name>`, or
+`list` to manage names protected by a specific blocker. Other nearby players, including
+admins, are block targets. `tt_blocker_freeze_timeout <id> <seconds>` changes
+that blocker's freeze recovery (0 disables it). Blocker whitelists and timeouts
+are runtime settings and reset when the blocker is removed or the server restarts.
+
+Pet skills start at level 1 and can each reach level 10. Use the My Pet vote
+page or `/pet_upgrade <race|blocker|defense|helper|aim>`; the vote page shows
+each next price and the overall rating. Upgrades are saved in `Accounts.sqlite`
+and older BOTS rows gain default level-1 skill columns when the server starts.
+Spawned pets apply purchased skill levels on their next bot tick. Race and
+Helper use a nearby tile route to get around walls and reach safe rescue
+positions; Defense rejects dangerous movement and hook pulls. A pet only fires
+weapons recorded in its saved pet weapon tier: skill levels do not grant laser.
+If laser is owned, distant rescues prefer it; close rescues use hammer, and
+hammer-only pets close in or hook the frozen player toward safety.
+The portable decision rules are in `TeeTycoon/src/game/server/bot_ai/`;
+`bot.cpp` and `botengine.cpp` remain the DDNet adapter and pathfinder.
+
+The separate [TeeTycoon bots repository](https://github.com/Yairbd2004/TeeTycoon-bots) carries a copy of those rules and
+the TeeTycoon adapter, plus a short installation script and DDNet porting
+notes. The adapter needs TeeTycoon's modified bot IDs, teams, player state,
+and game context; it is not a standalone drop-in for stock DDNet. After bot
+changes, sync the separate repository before publishing either copy.
+The latest rescue pass checks the full tee footprint for freeze, uses DDNet's
+hammer query geometry, and routes a frozen player toward a safe hook pull
+position. Blockers seek a longer, better-aligned pull before launching a
+throw. A high Defense pet simulates evasive movement and nearby wall hooks
+when an upward throw leads toward freeze. The local route now looks for a
+reachable climb hook staging point when the target is far above. These are
+bounded predictions; the pictured cases still need live gameplay checks.
 
 The checkout at `f43b9c1` stores `TeeTycoon/ddnet-libs` as ordinary tracked files rather than an initialized Git submodule, and some required Windows DLLs are ignored by Git. If configure reports a missing `libcurl.dll`, `zlib1.dll`, or other dependency DLL, restore the Windows x64 DLL files from the pinned `ddnet-libs` commit `c0e6703fbcdbe03df2f26875427ec3951ce4ec21` into the matching `TeeTycoon/ddnet-libs/<library>/windows/lib64/` directories. This checkout also needs `TeeTycoon/cmake/checksummed_extra.txt`, whose contents are in DDNet commit `647a2db7e3581c1deb45ff5dd877a41278a22798`; both items were restored locally for this build and remain ignored.
 
@@ -94,16 +171,17 @@ LAN check on the original development computer: the 20.1.1 server build complete
 
 The normal browser game type is `TT`. The tracked server override sets `sv_test_cmds 0`, so the running server is not in DDNet test mode and does not enable test/cheat commands. If test mode is deliberately enabled for development, the browser label is `TestTT`.
 
-Runtime databases, server configs, and event files are not source files and must be backed up separately when moving machines. On the original development computer, the active build data was under `TeeTycoon/out/build/20.1.1-msvc/` and included `Accounts.sqlite`, `ddnet-server.sqlite`, `autoexec_server.cfg`, `EventType.txt`, and `StartingEvent.txt`. A fresh clone does **not** contain ignored `out/` data. Before using a new build with existing player accounts, copy the needed database/config/event files from a verified backup and keep an untouched backup. Never commit live databases, passwords, or private server configuration.
+Runtime databases, server configs, and event files are not source files and must be backed up separately when moving machines. The development server keeps `Accounts.sqlite` beside `TeeTycoon Server/DDNet-Server.exe`; preserve it when recreating the build directory. A fresh clone does **not** contain ignored `out/` data. Before using a new build with existing player accounts, copy the needed database/config/event files from a verified backup and keep an untouched backup. Never commit live databases, passwords, or private server configuration.
 
 ## Source map for catching up
 
 Start with the current `dev` diff/log, then these locations. Search for command registration and table/entity setup rather than relying only on file names; upstream updates can move code.
 
 - `TeeTycoon/src/game/server/teetycoon.cpp` — main TeeTycoon mode logic: economy/progression, custom tiles/entities, house/pet and related server behavior.
-- `TeeTycoon/data/autoexec_server.cfg` — server vote options. The menu contains TeeTycoon sections only, with event actions first; default DDNet map and gravity options were removed. Selecting menu entries executes immediately without starting a ballot. Event start actions require an authenticated server admin; event join and personal game actions run for the selecting player.
-- The TeeTycoon account/shop information row sends money, level, XP, current upgrade levels, and next prices only to the selecting player. Pet details are also private when selected. Generic action labels are used so personal account values are not disclosed in server-wide vote messages.
-- `TeeTycoon/src/game/server/gamecontext.cpp` — intercepts TeeTycoon menu rows before DDNet vote rate limits and ballot creation; `TeeTycoon/src/game/server/teetycoon.cpp` contains the action allowlist and private information responses. Event start handlers in `ddracecommands.cpp` are registered as admin-only `tt_start_event_*` server commands. When adding menu actions, update both the allowlist and the vote options, preserve the immediate/no-ballot behavior, and keep account/pet data private.
+- `TeeTycoon/data/autoexec_server.cfg` — global event start votes only. The server builds a separate vote-option page for each player: event votes and category labels on the main page, then private Shop, Pet, Cosmetics, Travel, and Account pages with a Back label. Status rows do nothing when selected; personal actions execute immediately, while event starts remain global ballots.
+- `TeeTycoon/src/game/server/gamecontext.cpp` and `teetycoon.cpp` — the server sends and validates each player's current vote page. `gamecontext.cpp` initializes the shared account database and pet tables; `teetycoon.cpp` builds private status labels and owns the personal action allowlist. `player.h` stores each player's current page and labels. The client renders the server list directly so the same categories work in custom and standard DDNet clients. Refresh the page after changing displayed status; keep private data out of global `add_vote` options.
+- Pet purchases save the pet and charge money in one SQLite transaction; event start commands are only submitted after their global vote passes. When adding personal menu actions, update the menu builder and allowlist together.
+- `PET-BOT-ROADMAP.md` — next phase for slot-free pets, both blocker-bot modes, and later pet progression.
 - Player-facing TeeTycoon command replies in `teetycoon.cpp` use the `chatresp` console/log channel; DDNet's per-client chat logger forwards that channel to the player who ran the command. Using another channel only writes the response to the server log.
 - `TeeTycoon/src/game/server/gamecontext.{h,cpp}` — server context, initialization, hooks, commands and shared mode state.
 - `TeeTycoon/src/game/server/player.{h,cpp}` and `entities/character.{h,cpp}` — per-player data and gameplay integration.

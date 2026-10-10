@@ -61,7 +61,7 @@ public:
 	virtual int Port() const = 0;
 	virtual int MaxClients() const = 0;
 	virtual int ClientCount() const = 0;
-	virtual int NewBot(int ClientId) = 0;
+	virtual int NewBot(int ClientId, bool Virtual = false) = 0;
 	virtual int DelBot(int ClientId) = 0;
 	virtual int DistinctClientCount() const = 0;
 	virtual const char *ClientName(int ClientId) const = 0;
@@ -433,6 +433,7 @@ public:
 	// `pPersistentData` point is nonnull and contains the data the game
 	// previously stored.
 	virtual void OnClientConnected(int ClientId, void *pPersistentData) = 0;
+	virtual void OnBotSlotClaimed(int ClientId) = 0;
 
 	virtual void OnClientEnter(int ClientId) = 0;
 	virtual void OnClientDrop(int ClientId, const char *pReason) = 0;

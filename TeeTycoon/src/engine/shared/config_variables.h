@@ -727,6 +727,7 @@ MACRO_CONFIG_STR(SvBotSkin, sv_bot_skin, 24, "default", CFGFLAG_SERVER, "Bot ski
 MACRO_CONFIG_INT(SvBotAllowHook, sv_bot_allow_hook, 1, 0, 1, CFGFLAG_SERVER, "Allow bots to hook")
 MACRO_CONFIG_INT(SvBotAllowMove, sv_bot_allow_move, 1, 0, 1, CFGFLAG_SERVER, "Allow bots to move")
 MACRO_CONFIG_INT(SvBotAllowFire, sv_bot_allow_fire, 1, 0, 1, CFGFLAG_SERVER, "Allow bots to fire")
+MACRO_CONFIG_INT(SvBotDamageMode, sv_bot_damage_mode, 0, 0, 1, CFGFLAG_SERVER, "Treat weapon damage as aggression and save attackers of pet owners to the pet block list")
 MACRO_CONFIG_INT(SvBotDrawTarget, sv_bot_draw_target, 0, 0, 1, CFGFLAG_SERVER, "Show bot targets")
 MACRO_CONFIG_INT(SvBotEngineDrawGraph, sv_botengine_draw_graph, 0, 0, 1, CFGFLAG_SERVER, "Draw the bot navigation graph")
 

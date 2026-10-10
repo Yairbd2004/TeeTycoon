@@ -190,58 +190,6 @@ static int PlayerFlags_SixToSeven(int Flags)
 	return Seven;
 }
 
-void CPlayer::inviteThread()
-{
-	if(invited)
-	{
-		if(inviteTick + 1000 > Server()->Tick())
-		{
-			if(accept)
-			{
-				//teleport if the player that invited is in his house.
-				if(GameServer()->m_apPlayers[inviteID] && GameServer()->m_apPlayers[inviteID]->GetCharacter())
-				{
-					if(GameServer()->m_apPlayers[inviteID]->GetCharacter()->m_Home)
-					{
-						accept = false;
-						invited = false;
-						inviteTick = 0;
-						GameServer()->Teleport(GetCharacter(), GameServer()->m_apPlayers[inviteID]->GetCharacter()->m_Pos);
-						GameServer()->SetTeamInvite(GetCid(), inviteID + 1);
-						GameServer()->SendChatTarget(inviteID, "The player accepted your invite!");
-					}
-					else
-					{
-						accept = false;
-						invited = false;
-						inviteTick = 0;
-						//send to this player and to the invitor that couldnt tp cus the player isnt at his house.
-						GameServer()->SendChatTarget(GetCid(), "The player that invited u isn't in his house anymore!");
-						GameServer()->SendChatTarget(inviteID, "couldn't proccess the invite because you aren't at your house!");
-					}
-				}
-			}
-			else if(decline)
-			{
-				decline = false;
-				invited = false;
-				inviteTick = 0;
-				if(GameServer()->m_apPlayers[inviteID]->GetCharacter())
-					GameServer()->SendChatTarget(inviteID, "The player Declined your invite!");
-			}
-		}
-		else
-		{
-			//time up, send message to the invitor.
-			invited = false;
-			inviteTick = 0;
-			GameServer()->SendChatTarget(GetCid(), "the invite expired!, please ask for a new one.");
-			if(GameServer()->m_apPlayers[inviteID]->GetCharacter())
-				GameServer()->SendChatTarget(inviteID, "the invite expired! please send a new one.");
-		}
-	}
-}
-
 void CPlayer::Tick()
 {
 	if(m_ScoreQueryResult != nullptr && m_ScoreQueryResult->m_Completed && m_SentSnaps >= 3)
@@ -884,12 +832,50 @@ void CPlayer::TryRespawn()
 
 	if(!GameServer()->m_pController->CanSpawn(m_Team, &SpawnPos, m_ClientId))
 		return;
+	// Choose the owner's location before creating the pet character. A pet
+	// respawning from freeze must not appear on a frozen spawn tile and then
+	// have its relocation rejected by the normal anti-teleport guard.
+	if(m_IsBot && m_pBot && m_pBot->owner >= 0 && m_pBot->owner < MAX_CLIENTS &&
+		GameServer()->m_apPlayers[m_pBot->owner] && GameServer()->m_apPlayers[m_pBot->owner]->GetCharacter())
+	{
+		CCharacter *pOwner = GameServer()->m_apPlayers[m_pBot->owner]->GetCharacter();
+		GameServer()->m_pController->Teams().SetForceCharacterTeam(m_ClientId, pOwner->Team());
+		if(!GameServer()->IsBotFrozen(pOwner))
+		{
+			SpawnPos = pOwner->m_Pos;
+			m_pBot->m_RaceToFrozenOwner = false;
+		}
+		else
+			m_pBot->m_RaceToFrozenOwner = true;
+	}
 
 	m_WeakHookSpawn = false;
 	m_Spawning = false;
 	m_pCharacter = new(m_ClientId) CCharacter(&GameServer()->m_World, GameServer()->GetLastPlayerInput(m_ClientId));
 	m_ViewPos = SpawnPos;
 	m_pCharacter->Spawn(this, SpawnPos);
+	if(!m_IsBot && m_HouseReturnPending)
+	{
+		m_HouseReturnPending = false;
+		GameServer()->MovePlayerAndPet(m_ClientId, m_HouseReturnTeam, m_HouseReturnPos);
+	}
+	else if(!m_IsBot && m_HouseVisitHost >= 0)
+	{
+		CPlayer *pHost = m_HouseVisitHost < MAX_CLIENTS ? GameServer()->m_apPlayers[m_HouseVisitHost] : nullptr;
+		if(pHost && pHost->GetCharacter() && GameServer()->GetDDRaceTeam(m_HouseVisitHost) == m_HouseVisitHost + 1)
+			GameServer()->MovePlayerAndPet(m_ClientId, m_HouseVisitHost + 1, pHost->GetCharacter()->m_Pos);
+		else
+			GameServer()->EndHouseVisit(m_ClientId);
+	}
+	if(m_IsBot && m_pBot && m_pBot->owner >= 0 && m_pBot->owner < MAX_CLIENTS &&
+		GameServer()->m_apPlayers[m_pBot->owner] && GameServer()->m_apPlayers[m_pBot->owner]->GetCharacter())
+	{
+		CCharacter *pOwner = GameServer()->m_apPlayers[m_pBot->owner]->GetCharacter();
+		if(m_pCharacter->Team() != pOwner->Team())
+			GameServer()->m_pController->Teams().SetForceCharacterTeam(m_ClientId, pOwner->Team());
+	}
+	if(m_IsBot && m_pBot)
+		m_pBot->m_RespawnFromFreeze = false;
 	GameServer()->CreatePlayerSpawn(SpawnPos, GameServer()->m_pController->GetMaskForPlayerWorldEvent(m_ClientId));
 
 	if(g_Config.m_SvTeam == SV_TEAM_FORCED_SOLO)

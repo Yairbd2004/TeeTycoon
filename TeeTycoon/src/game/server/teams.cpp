@@ -461,6 +461,11 @@ bool CGameTeams::SetCharacterTeam(int ClientId, int Team, char *pError, int Erro
 
 void CGameTeams::SetForceCharacterTeam(int ClientId, int Team)
 {
+	if(ClientId < 0 || ClientId >= MAX_CLIENTS || Team < TEAM_FLOCK || Team >= NUM_DDRACE_TEAMS)
+	{
+		dbg_msg("teams", "Ignoring invalid forced team update: client=%d team=%d", ClientId, Team);
+		return;
+	}
 	m_aTeeStarted[ClientId] = false;
 	m_aTeeFinished[ClientId] = false;
 	int OldTeam = m_Core.Team(ClientId);
@@ -635,7 +640,7 @@ void CGameTeams::SendTeamsState(int ClientId)
 	if(g_Config.m_SvTeam == SV_TEAM_FORCED_SOLO)
 		return;
 
-	if(!m_pGameContext->m_apPlayers[ClientId])
+	if(!m_pGameContext->m_apPlayers[ClientId] || m_pGameContext->m_apPlayers[ClientId]->m_IsBot)
 		return;
 
 	CMsgPacker Msg(NETMSGTYPE_SV_TEAMSSTATE);
@@ -697,7 +702,11 @@ void CGameTeams::UpdateLegacyTeamMap()
 	// correct, at the cost of showing a different team number than the one the player joined.
 	bool aTeamOccupied[NUM_DDRACE_TEAMS] = {};
 	for(int i = 0; i < MAX_CLIENTS; i++)
-		aTeamOccupied[m_Core.Team(i)] = true;
+	{
+		const int Team = m_Core.Team(i);
+		if(Team >= TEAM_FLOCK && Team < NUM_DDRACE_TEAMS)
+			aTeamOccupied[Team] = true;
+	}
 
 	// teams that the client can represent keep their own number
 	for(int Team = TEAM_FLOCK; Team < LEGACY_TEAM_SUPER; Team++)

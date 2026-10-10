@@ -67,12 +67,15 @@ void CServerBan::InitServerBan(IConsole *pConsole, IStorage *pStorage, CServer *
 	Console()->Register("ban_region_range", "s[region] s[first ip] s[last ip] ?i[minutes] r[reason]", CFGFLAG_SERVER | CFGFLAG_STORE, ConBanRegionRange, this, "Ban range in a region");
 }
 
-int CServer::NewBot(int ClientID)
+int CServer::NewBot(int ClientID, bool Virtual)
 {
-	if(m_aClients[ClientID].m_State > CClient::STATE_EMPTY && !m_aClients[ClientID].m_IsBot)
+	if(ClientID < 0 || ClientID >= MAX_CLIENTS || (Virtual ? ClientID < MaxClients() : ClientID >= MaxClients()))
+		return 1;
+	if(m_aClients[ClientID].m_State != CClient::STATE_EMPTY)
 		return 1;
 	m_aClients[ClientID].m_State = CClient::STATE_INGAME;
 	m_aClients[ClientID].m_IsBot = true;
+	m_aClients[ClientID].m_IsVirtualBot = Virtual;
 	return 0;
 }
 
@@ -88,6 +91,7 @@ int CServer::DelBot(int ClientID)
 	m_aClients[ClientID].m_AuthTries = 0;
 	m_aClients[ClientID].m_pRconCmdToSend = 0;
 	m_aClients[ClientID].m_IsBot = false;
+	m_aClients[ClientID].m_IsVirtualBot = false;
 	m_aClients[ClientID].m_Snapshots.PurgeAll();
 	return 0;
 }
@@ -847,7 +851,7 @@ int CServer::ClientCount() const
 	int ClientCount = 0;
 	for(const auto &Client : m_aClients)
 	{
-		if(Client.m_State != CClient::STATE_EMPTY)
+		if(Client.m_State != CClient::STATE_EMPTY && !Client.m_IsVirtualBot)
 		{
 			ClientCount++;
 		}
@@ -862,7 +866,7 @@ int CServer::DistinctClientCount() const
 	for(int i = 0; i < MAX_CLIENTS; i++)
 	{
 		// connecting clients with spoofed ips can clog slots without being ingame
-		apAddresses[i] = ClientIngame(i) ? ClientAddr(i) : nullptr;
+		apAddresses[i] = ClientIngame(i) && !m_aClients[i].m_IsBot ? ClientAddr(i) : nullptr;
 	}
 
 	int ClientCount = 0;
@@ -975,22 +979,11 @@ int CServer::SendMsg(CMsgPacker *pMsg, int Flags, int ClientId)
 
 		if(!(Flags & MSGFLAG_NOSEND))
 		{
-			if(ClientId == -1)
+			// Bots have game identities but no network connection. In particular,
+			// virtual bots can have IDs above MaxClients().
+			for(int i = 0; ClientId == -1 && i < MaxClients(); i++)
 			{
-				// broadcast
-				int i;
-				for(i = 0; i < MAX_CLIENTS; i++)
-					if(m_aClients[i].m_State == CClient::STATE_INGAME && !m_aClients[i].m_IsBot)
-					{
-						Packet.m_ClientId = i;
-						m_NetServer.Send(&Packet);
-					}
-			}
-			else if(!m_aClients[ClientId].m_IsBot)
-				m_NetServer.Send(&Packet);
-			for(int i = 0; i < MAX_CLIENTS; i++)
-			{
-				if(m_aClients[i].m_State == CClient::STATE_INGAME)
+				if(m_aClients[i].m_State == CClient::STATE_INGAME && !m_aClients[i].m_IsBot)
 				{
 					CPacker *pPack = m_aClients[i].m_Sixup ? &Pack7 : &Pack6;
 					Packet.m_pData = pPack->Data();
@@ -1007,6 +1000,8 @@ int CServer::SendMsg(CMsgPacker *pMsg, int Flags, int ClientId)
 	}
 	else
 	{
+		if(ClientId >= MaxClients() || m_aClients[ClientId].m_IsBot)
+			return 0;
 		CPacker Pack;
 		if(!RepackMsg(pMsg, Pack, m_aClients[ClientId].m_Sixup))
 			return -1;
@@ -1040,6 +1035,8 @@ int CServer::SendMsg(CMsgPacker *pMsg, int Flags, int ClientId)
 
 void CServer::SendMsgRaw(int ClientId, const void *pData, int Size, int Flags)
 {
+	if(ClientId < 0 || ClientId >= MaxClients() || m_aClients[ClientId].m_IsBot)
+		return;
 	CNetChunk Packet;
 	mem_zero(&Packet, sizeof(CNetChunk));
 	Packet.m_ClientId = ClientId;
@@ -1257,6 +1254,8 @@ int CServer::ClientRejoinCallback(int ClientId, void *pUser, bool Sixup, bool Va
 int CServer::NewClientNoAuthCallback(int ClientId, void *pUser)
 {
 	CServer *pThis = (CServer *)pUser;
+	if(pThis->m_aClients[ClientId].m_IsBot)
+		pThis->GameServer()->OnBotSlotClaimed(ClientId);
 
 	pThis->m_aClients[ClientId].m_DnsblState = EDnsblState::NONE;
 
@@ -1291,6 +1290,8 @@ int CServer::NewClientNoAuthCallback(int ClientId, void *pUser)
 int CServer::NewClientCallback(int ClientId, void *pUser, bool Sixup)
 {
 	CServer *pThis = (CServer *)pUser;
+	if(pThis->m_aClients[ClientId].m_IsBot)
+		pThis->GameServer()->OnBotSlotClaimed(ClientId);
 	pThis->m_aClients[ClientId].m_State = CClient::STATE_PREAUTH;
 	pThis->m_aClients[ClientId].m_DnsblState = EDnsblState::NONE;
 	pThis->m_aClients[ClientId].m_aName[0] = 0;
@@ -4199,6 +4200,8 @@ void CServer::SaveDemo(int ClientId, float Time)
 
 void CServer::StartRecord(int ClientId)
 {
+	if(ClientId < 0 || ClientId >= MaxClients() || m_aClients[ClientId].m_IsBot)
+		return;
 	if(Config()->m_SvPlayerDemoRecord)
 	{
 		char aFilename[IO_MAX_PATH_LENGTH];
