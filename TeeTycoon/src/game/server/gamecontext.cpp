@@ -4397,6 +4397,10 @@ void CGameContext::OnInit(const void *pPersistentData)
 		if(DbResult == SQLITE_OK)
 			DbResult = sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS TT_EVENT_STATE (ID INTEGER PRIMARY KEY CHECK(ID = 1), LAST_START_UNIX INTEGER NOT NULL DEFAULT 0, ACTIVE_EVENT INTEGER NOT NULL DEFAULT 0)", nullptr, nullptr, &pError);
 		if(DbResult == SQLITE_OK)
+			DbResult = sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS TT_BOT_NAV_LEARNING (MAP_NAME TEXT NOT NULL, TILE_INDEX INTEGER NOT NULL, DEATHS INTEGER NOT NULL DEFAULT 0, VISITS INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (MAP_NAME, TILE_INDEX))", nullptr, nullptr, &pError);
+		if(DbResult == SQLITE_OK)
+			DbResult = sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS TT_BOT_NAV_SPEED (MAP_NAME TEXT NOT NULL, TILE_INDEX INTEGER NOT NULL, BEST_TICKS INTEGER NOT NULL, PRIMARY KEY (MAP_NAME, TILE_INDEX))", nullptr, nullptr, &pError);
+		if(DbResult == SQLITE_OK)
 		{
 			bool HasActiveEventColumn = false;
 			sqlite3_stmt *pEventColumns = nullptr;

@@ -197,6 +197,13 @@ public:
 	bool m_HasBlockStance = false;
 	int m_LastBlockJumpCheckTick = -1;
 	bool m_BlockJumpArcSafe = false;
+	int m_PlayerHookTargetId = -1;
+	int m_PlayerHookHoldUntilTick = -1;
+	bool m_BlockerSpawnTelePending = false;
+	bool m_BlockerSpawnTeleUsed = false;
+	vec2 m_BlockerSpawnTelePos = vec2(0, 0);
+	vec2 m_BlockerPatrolPos = vec2(0, 0);
+	int m_LastBlockerPatrolTick = -1;
 	vec2 m_LastProgressPos = vec2(0, 0);
 	int m_LastProgressTick = -1;
 	vec2 m_LastGoalProgressTarget = vec2(0, 0);

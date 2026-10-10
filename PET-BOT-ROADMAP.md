@@ -89,12 +89,13 @@ for admin blockers as well.
 Implemented: pet target relations and timeout persist in `Accounts.sqlite`;
 target names are matched exactly against current in-game names, including
 unlogged players. A renamed player needs a new entry;
-blocker target lists and timeout are RCON-managed per active blocker. Bot
-target selection respects DDRace teams and a bounded pursuit radius. Freeze
-respawn preserves house teams and uses the bot's navigation graph to find a
-reachable teleporter entrance when the owner remains frozen. Live gameplay
-checks remain for multiple map teleporter exits, crowded blocker fights,
-freeze tiles during house travel, and performance with many active bots.
+blocker target lists and timeout are RCON-managed per active blocker. Pet
+target selection remains team-aware and range-limited. Blocker bots select the
+closest eligible opponent anywhere on the map. Freeze respawn preserves house
+teams and uses the map navigation graph and teleporter entrances to find a
+reachable target when direct navigation fails. Live gameplay checks remain for
+multiple map teleporter exits, crowded blocker fights, freeze tiles during
+house travel, and performance with many active bots.
 
 ## Upgradeable pet intelligence
 
@@ -138,6 +139,18 @@ live checks on the three reported screenshots, varied maps, and full-server
 CPU load remain open. If those scenarios still fail, capture player/pet map
 positions and current hook state in a trace so the route and physics scores
 can be corrected against an exact reproduction.
+
+For `TeeTycoon`, the complete map graph remains the long-distance planner and
+nearby obstacle refinement uses tile A*. For `Copy Love Box-TT`, tile A* scans
+the whole 387x250 game layer. If there is no opponent to pursue, a blocker
+targets teleport 249 out of spawn when present; otherwise it uses an available
+reachable teleporter and then patrols reachable graph points. Combat and rescue
+hooks stay held while the hook is in flight; jump-based blocking momentum no
+longer disables climb hooks. Route history for both maps is stored in
+`Accounts.sqlite`: the last visited tiles before a bot death gain a persistent
+risk cost, and the fastest observed crossing times slightly favor traversed
+tiles. This improves route choices over time but does not prove every physics
+route is reachable; reproduce and tune live on each map after deployment.
 
 Block targets continuously frozen on freeze tiles for one server second are
 now skipped, including targets held in airborne freeze by speed tiles. This

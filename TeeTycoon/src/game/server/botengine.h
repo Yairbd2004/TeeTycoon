@@ -222,6 +222,16 @@ protected:
 
 	int m_Width;
 	int m_Height;
+	std::vector<uint8_t> m_vNavigationDeaths;
+	std::vector<int> m_vNavigationBestTicks;
+	struct SBotTrail
+	{
+		int m_aTiles[12];
+		int m_Count;
+		int m_LastTile;
+		int m_LastTileTick;
+	};
+	SBotTrail m_aBotTrails[MAX_CLIENTS];
 
 	CGraph m_Graph;
 	bool m_GraphInitialized = false;
@@ -299,6 +309,10 @@ public:
 	int NetworkClipped(int SnappingClient, vec2 CheckPos);
 
 	void OnCharacterDeath(int Victim, int Killer, int Weapon);
+	void TrackBotPosition(int ClientId, vec2 Pos, int Tick);
+	int NavigationDeathPenalty(vec2 Pos) const;
+	int NavigationBestTileTicks(vec2 Pos) const;
+	void RecordNavigationDeath(int ClientId);
 	void RegisterBot(int CID, class CBot *pBot);
 	void UnRegisterBot(int CID);
 

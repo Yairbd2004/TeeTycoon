@@ -5,14 +5,21 @@
 #include <generated/protocol.h>
 #include <game/layers.h>
 #include <game/mapitems.h>
+#include <sqlite3.h>
 #include <cstdlib>
 #include <algorithm>
+#include <limits>
 #include <optional>
 #include <queue>
 #include <vector>
 
 #include "bot.h"
 #include "botengine.h"
+
+static bool IsSupportedBotLearningMap(const char *pName)
+{
+	return pName && (str_comp(pName, "TeeTycoon") == 0 || str_comp(pName, "Copy Love Box-TT") == 0);
+}
 
 CGraph::CGraph()
 {
@@ -125,6 +132,12 @@ CBotEngine::CBotEngine(CGameContext *pGameServer)
 	m_SegmentCount = 0;
 	mem_zero(m_aPaths, sizeof(m_aPaths));
 	mem_zero(m_apBot, sizeof(m_apBot));
+	mem_zero(m_aBotTrails, sizeof(m_aBotTrails));
+	for(auto &Trail : m_aBotTrails)
+	{
+		Trail.m_LastTile = -1;
+		Trail.m_LastTileTick = -1;
+	}
 }
 
 void CBotEngine::Free()
@@ -186,8 +199,44 @@ void CBotEngine::Init(CTile *pTiles, int Width, int Height)
 
 	m_Width = Width;
 	m_Height = Height;
+	m_vNavigationDeaths.assign(static_cast<size_t>(Width) * Height, 0);
+	m_vNavigationBestTicks.assign(static_cast<size_t>(Width) * Height, std::numeric_limits<int>::max());
 
 	Free();
+	for(auto &Trail : m_aBotTrails)
+	{
+		mem_zero(&Trail, sizeof(Trail));
+		Trail.m_LastTile = -1;
+		Trail.m_LastTileTick = -1;
+	}
+	if(GameServer()->db && GameServer()->Map() && IsSupportedBotLearningMap(GameServer()->Map()->BaseName()))
+	{
+		sqlite3_stmt *pStmt = nullptr;
+		if(sqlite3_prepare_v2(GameServer()->db, "SELECT TILE_INDEX, DEATHS FROM TT_BOT_NAV_LEARNING WHERE MAP_NAME = ?1", -1, &pStmt, nullptr) == SQLITE_OK)
+		{
+			sqlite3_bind_text(pStmt, 1, GameServer()->Map()->BaseName(), -1, SQLITE_TRANSIENT);
+			while(sqlite3_step(pStmt) == SQLITE_ROW)
+			{
+				const int Tile = sqlite3_column_int(pStmt, 0);
+				const int Deaths = sqlite3_column_int(pStmt, 1);
+				if(Tile >= 0 && Tile < static_cast<int>(m_vNavigationDeaths.size()))
+					m_vNavigationDeaths[Tile] = static_cast<uint8_t>(std::clamp(Deaths, 0, 255));
+			}
+		}
+		sqlite3_finalize(pStmt);
+		if(sqlite3_prepare_v2(GameServer()->db, "SELECT TILE_INDEX, BEST_TICKS FROM TT_BOT_NAV_SPEED WHERE MAP_NAME = ?1", -1, &pStmt, nullptr) == SQLITE_OK)
+		{
+			sqlite3_bind_text(pStmt, 1, GameServer()->Map()->BaseName(), -1, SQLITE_TRANSIENT);
+			while(sqlite3_step(pStmt) == SQLITE_ROW)
+			{
+				const int Tile = sqlite3_column_int(pStmt, 0);
+				const int BestTicks = sqlite3_column_int(pStmt, 1);
+				if(Tile >= 0 && Tile < static_cast<int>(m_vNavigationBestTicks.size()))
+					m_vNavigationBestTicks[Tile] = std::max(1, BestTicks);
+			}
+		}
+		sqlite3_finalize(pStmt);
+	}
 	if(GameServer()->Collision()->TeleLayer())
 	{
 		for(int Index = 0; Index < Width * Height; ++Index)
@@ -1114,19 +1163,126 @@ int CBotEngine::GetClosestVertex(vec2 Pos)
 void CBotEngine::OnCharacterDeath(int Victim, int Killer, int Weapon)
 {
 	if(m_apBot[Victim])
+	{
+		RecordNavigationDeath(Victim);
 		m_apBot[Victim]->m_GenomeTick >>= 1;
+	}
 	if(m_apBot[Killer])
 		m_apBot[Killer]->m_GenomeTick <<= 1;
 }
 
+void CBotEngine::TrackBotPosition(int ClientId, vec2 Pos, int Tick)
+{
+	if(ClientId < 0 || ClientId >= MAX_CLIENTS || m_Width <= 0 || m_Height <= 0)
+		return;
+	const int X = std::clamp(static_cast<int>(Pos.x / 32.0f), 0, m_Width - 1);
+	const int Y = std::clamp(static_cast<int>(Pos.y / 32.0f), 0, m_Height - 1);
+	const int Tile = Y * m_Width + X;
+	SBotTrail &Trail = m_aBotTrails[ClientId];
+	if(Tile == Trail.m_LastTile)
+		return;
+	const int ElapsedTicks = Trail.m_LastTileTick >= 0 ? std::max(1, Tick - Trail.m_LastTileTick) : -1;
+	Trail.m_LastTile = Tile;
+	Trail.m_LastTileTick = Tick;
+	if(Trail.m_Count < static_cast<int>(std::size(Trail.m_aTiles)))
+		Trail.m_aTiles[Trail.m_Count++] = Tile;
+	else
+	{
+		std::move(Trail.m_aTiles + 1, Trail.m_aTiles + std::size(Trail.m_aTiles), Trail.m_aTiles);
+		Trail.m_aTiles[std::size(Trail.m_aTiles) - 1] = Tile;
+	}
+	if(Tile >= 0 && Tile < static_cast<int>(m_vNavigationDeaths.size()) && GameServer()->db &&
+		GameServer()->Map() && IsSupportedBotLearningMap(GameServer()->Map()->BaseName()))
+	{
+		sqlite3_stmt *pStmt = nullptr;
+		if(sqlite3_prepare_v2(GameServer()->db, "INSERT INTO TT_BOT_NAV_LEARNING (MAP_NAME, TILE_INDEX, VISITS) VALUES (?1, ?2, 1) ON CONFLICT(MAP_NAME, TILE_INDEX) DO UPDATE SET VISITS = VISITS + 1", -1, &pStmt, nullptr) == SQLITE_OK)
+		{
+			sqlite3_bind_text(pStmt, 1, GameServer()->Map()->BaseName(), -1, SQLITE_TRANSIENT);
+			sqlite3_bind_int(pStmt, 2, Tile);
+			sqlite3_step(pStmt);
+		}
+		sqlite3_finalize(pStmt);
+		if(ElapsedTicks > 0)
+		{
+			m_vNavigationBestTicks[Tile] = std::min(m_vNavigationBestTicks[Tile], ElapsedTicks);
+			if(sqlite3_prepare_v2(GameServer()->db, "INSERT INTO TT_BOT_NAV_SPEED (MAP_NAME, TILE_INDEX, BEST_TICKS) VALUES (?1, ?2, ?3) ON CONFLICT(MAP_NAME, TILE_INDEX) DO UPDATE SET BEST_TICKS = MIN(BEST_TICKS, excluded.BEST_TICKS)", -1, &pStmt, nullptr) == SQLITE_OK)
+			{
+				sqlite3_bind_text(pStmt, 1, GameServer()->Map()->BaseName(), -1, SQLITE_TRANSIENT);
+				sqlite3_bind_int(pStmt, 2, Tile);
+				sqlite3_bind_int(pStmt, 3, ElapsedTicks);
+				sqlite3_step(pStmt);
+			}
+			sqlite3_finalize(pStmt);
+		}
+	}
+}
+
+int CBotEngine::NavigationDeathPenalty(vec2 Pos) const
+{
+	if(m_Width <= 0 || m_Height <= 0 || m_vNavigationDeaths.empty())
+		return 0;
+	const int X = std::clamp(static_cast<int>(Pos.x / 32.0f), 0, m_Width - 1);
+	const int Y = std::clamp(static_cast<int>(Pos.y / 32.0f), 0, m_Height - 1);
+	return m_vNavigationDeaths[Y * m_Width + X];
+}
+
+int CBotEngine::NavigationBestTileTicks(vec2 Pos) const
+{
+	if(m_Width <= 0 || m_Height <= 0 || m_vNavigationBestTicks.empty())
+		return std::numeric_limits<int>::max();
+	const int X = std::clamp(static_cast<int>(Pos.x / 32.0f), 0, m_Width - 1);
+	const int Y = std::clamp(static_cast<int>(Pos.y / 32.0f), 0, m_Height - 1);
+	return m_vNavigationBestTicks[Y * m_Width + X];
+}
+
+void CBotEngine::RecordNavigationDeath(int ClientId)
+{
+	if(ClientId < 0 || ClientId >= MAX_CLIENTS || !GameServer()->db || !GameServer()->Map() ||
+		!IsSupportedBotLearningMap(GameServer()->Map()->BaseName()))
+		return;
+	SBotTrail &Trail = m_aBotTrails[ClientId];
+	sqlite3_stmt *pStmt = nullptr;
+	if(sqlite3_prepare_v2(GameServer()->db, "INSERT INTO TT_BOT_NAV_LEARNING (MAP_NAME, TILE_INDEX, DEATHS) VALUES (?1, ?2, 1) ON CONFLICT(MAP_NAME, TILE_INDEX) DO UPDATE SET DEATHS = DEATHS + 1", -1, &pStmt, nullptr) != SQLITE_OK)
+		return;
+	const int Begin = std::max(0, Trail.m_Count - 6);
+	for(int i = Begin; i < Trail.m_Count; i++)
+	{
+		const int Tile = Trail.m_aTiles[i];
+		if(Tile < 0 || Tile >= static_cast<int>(m_vNavigationDeaths.size()))
+			continue;
+		m_vNavigationDeaths[Tile] = static_cast<uint8_t>(std::min(255, m_vNavigationDeaths[Tile] + 1));
+		sqlite3_reset(pStmt);
+		sqlite3_clear_bindings(pStmt);
+		sqlite3_bind_text(pStmt, 1, GameServer()->Map()->BaseName(), -1, SQLITE_TRANSIENT);
+		sqlite3_bind_int(pStmt, 2, Tile);
+		sqlite3_step(pStmt);
+	}
+	sqlite3_finalize(pStmt);
+	Trail.m_Count = 0;
+	Trail.m_LastTile = -1;
+	Trail.m_LastTileTick = -1;
+}
+
 void CBotEngine::RegisterBot(int CID, CBot *pBot)
 {
-	m_apBot[CID] = pBot;
+	if(CID >= 0 && CID < MAX_CLIENTS)
+	{
+		m_apBot[CID] = pBot;
+		mem_zero(&m_aBotTrails[CID], sizeof(m_aBotTrails[CID]));
+		m_aBotTrails[CID].m_LastTile = -1;
+		m_aBotTrails[CID].m_LastTileTick = -1;
+	}
 }
 
 void CBotEngine::UnRegisterBot(int CID)
 {
-	m_apBot[CID] = 0;
+	if(CID >= 0 && CID < MAX_CLIENTS)
+	{
+		m_apBot[CID] = 0;
+		mem_zero(&m_aBotTrails[CID], sizeof(m_aBotTrails[CID]));
+		m_aBotTrails[CID].m_LastTile = -1;
+		m_aBotTrails[CID].m_LastTileTick = -1;
+	}
 }
 
 int CBotEngine::NetworkClipped(int SnappingClient, vec2 CheckPos)
