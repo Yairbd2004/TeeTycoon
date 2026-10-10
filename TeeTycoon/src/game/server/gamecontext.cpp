@@ -1218,6 +1218,7 @@ void CGameContext::OnPreTickTeehistorian()
 void CGameContext::OnTick()
 {
 	DeleteBot();
+	UpdateFreezeTileStates();
 	for(auto &pPlayer : m_apPlayers)
 	{
 		if(pPlayer && pPlayer->IsBot() && pPlayer->m_pBot)
@@ -4260,6 +4261,8 @@ void CGameContext::RegisterChatCommands()
 
 void CGameContext::OnInit(const void *pPersistentData)
 {
+	for(auto &State : m_aFreezeTileState)
+		State = {};
 	const CPersistentData *pPersistent = (const CPersistentData *)pPersistentData;
 
 	m_pServer = Kernel()->RequestInterface<IServer>();

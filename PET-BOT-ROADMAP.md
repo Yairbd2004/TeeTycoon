@@ -120,6 +120,13 @@ CPU load remain open. If those scenarios still fail, capture player/pet map
 positions and current hook state in a trace so the route and physics scores
 can be corrected against an exact reproduction.
 
+Block targets continuously frozen on freeze tiles for one server second are
+now skipped, including targets held in airborne freeze by speed tiles. This
+timer is shared by pets and admin blockers and resets when a tee leaves the
+freeze tiles or respawns. The nearby tile route also requires an uphill step
+beyond jump height to have a reachable hookable surface. Both changes still
+need a live gameplay pass against moving targets and the reported ledges.
+
 Keep the skill rules and decision policy in `TeeTycoon/src/game/server/bot_ai/`
 without DDNet headers, so other mods can copy them. `bot.cpp` translates
 DDNet characters and collision results into those decisions. The older bot

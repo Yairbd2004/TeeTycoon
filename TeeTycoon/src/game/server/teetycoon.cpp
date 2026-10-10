@@ -1,6 +1,7 @@
 #include "gamecontext.h"
 #include "bot.h"
 #include "botengine.h"
+#include "bot_ai/brain.h"
 #include "player.h"
 #include "pet_skill_storage.h"
 #include "score.h"
@@ -2158,12 +2159,65 @@ bool CGameContext::IsBotFrozen(const CCharacter *pCharacter)
 		return false;
 	if(pCharacter->m_FreezeTime > 0 || pCharacter->Core()->m_DeepFrozen || pCharacter->Core()->m_LiveFrozen)
 		return true;
-	const int Index = Collision()->GetPureMapIndex(pCharacter->GetPos());
+	return IsCharacterOnFreezeTile(pCharacter->GetPos());
+}
+
+bool CGameContext::IsCharacterOnFreezeTile(vec2 Pos)
+{
+	return IsCharacterCenterOnFreezeTile(Pos) ||
+		IsCharacterCenterOnFreezeTile(Pos + vec2(0, 14)) ||
+		IsCharacterCenterOnFreezeTile(Pos + vec2(0, 24)) ||
+		IsCharacterCenterOnFreezeTile(Pos + vec2(14, 0)) ||
+		IsCharacterCenterOnFreezeTile(Pos - vec2(14, 0));
+}
+
+bool CGameContext::IsCharacterCenterOnFreezeTile(vec2 Pos)
+{
+	const int Index = Collision()->GetPureMapIndex(Pos);
 	const auto IsFreezeTile = [](int Tile) {
 		return Tile == TILE_FREEZE || Tile == TILE_DFREEZE || Tile == TILE_LFREEZE;
 	};
-	return IsFreezeTile(Collision()->GetTileIndex(Index)) || IsFreezeTile(Collision()->GetFrontTileIndex(Index)) ||
+	return IsFreezeTile(Collision()->GetTileIndex(Index)) ||
+		IsFreezeTile(Collision()->GetFrontTileIndex(Index)) ||
 		IsFreezeTile(Collision()->GetSwitchType(Index));
+}
+
+void CGameContext::UpdateFreezeTileStates()
+{
+	const int Now = Server()->Tick();
+	for(int ClientId = 0; ClientId < Server()->MaxClients(); ClientId++)
+	{
+		SFreezeTileState &State = m_aFreezeTileState[ClientId];
+		CCharacter *pCharacter = m_apPlayers[ClientId] ? m_apPlayers[ClientId]->GetCharacter() : nullptr;
+		const bool Frozen = pCharacter && (pCharacter->m_FreezeTime > 0 ||
+			pCharacter->Core()->m_DeepFrozen || pCharacter->Core()->m_LiveFrozen);
+		if(!Frozen ||
+			!IsCharacterCenterOnFreezeTile(pCharacter->GetPos()))
+		{
+			State = {};
+			continue;
+		}
+		if(State.m_StartTick < 0 || State.m_SpawnTick != pCharacter->m_SpawnTick)
+		{
+			State.m_StartTick = Now;
+			State.m_SpawnTick = pCharacter->m_SpawnTick;
+		}
+	}
+}
+
+bool CGameContext::IsPlayerFreezeLocked(int ClientId)
+{
+	if(ClientId < 0 || ClientId >= Server()->MaxClients() || !m_apPlayers[ClientId] ||
+		!m_apPlayers[ClientId]->GetCharacter())
+		return false;
+	const CCharacter *pCharacter = m_apPlayers[ClientId]->GetCharacter();
+	if((pCharacter->m_FreezeTime <= 0 && !pCharacter->Core()->m_DeepFrozen &&
+			!pCharacter->Core()->m_LiveFrozen) ||
+		!IsCharacterCenterOnFreezeTile(pCharacter->GetPos()))
+		return false;
+	const SFreezeTileState &State = m_aFreezeTileState[ClientId];
+	return State.m_SpawnTick == pCharacter->m_SpawnTick &&
+		bot_ai::FreezeTileLocked(Server()->Tick(), State.m_StartTick, Server()->TickSpeed());
 }
 
 void CGameContext::SetPetData(int id, std::string username)

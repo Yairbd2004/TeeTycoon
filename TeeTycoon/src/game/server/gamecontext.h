@@ -21,6 +21,7 @@
 #include <game/voting.h>
 
 #include <map>
+#include <array>
 #include <memory>
 #include <optional>
 #include <string>
@@ -137,6 +138,14 @@ class CGameContext : public IGameServer
 	CUuid m_GameUuid;
 	CMapBugs m_MapBugs;
 	CPrng m_Prng;
+	struct SFreezeTileState
+	{
+		int m_StartTick = -1;
+		int m_SpawnTick = -1;
+	};
+	std::array<SFreezeTileState, MAX_CLIENTS> m_aFreezeTileState{};
+	bool IsCharacterCenterOnFreezeTile(vec2 Pos);
+	void UpdateFreezeTileStates();
 
 	bool m_Resetting;
 
@@ -206,6 +215,8 @@ public:
 	void BotStay(int ClientId, bool Stay);
 	void OwnerHurt(int ClientId, int EnemyId);
 	bool IsBotFrozen(const CCharacter *pCharacter);
+	bool IsCharacterOnFreezeTile(vec2 Pos);
+	bool IsPlayerFreezeLocked(int ClientId);
 	void OnProtectedPlayerHurt(int VictimId, int EnemyId, bool DealtDamage);
 	void AutoBlockPetAggressor(int OwnerId, int EnemyId);
 	bool AddBot(int ClientId, int OwnerId, bool UseDropPlayer, bool Virtual = false);

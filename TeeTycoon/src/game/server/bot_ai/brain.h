@@ -128,6 +128,11 @@ inline bool FireAtTarget(bool Fighting, bool TargetFrozen, bool ShotTowardFreeze
 	return ShotTowardFreeze && (!Fighting || !TargetFrozen);
 }
 
+inline bool FreezeTileLocked(int NowTick, int EnterTick, int TicksPerSecond)
+{
+	return EnterTick >= 0 && TicksPerSecond > 0 && NowTick - EnterTick >= TicksPerSecond;
+}
+
 // Matches CCharacter::FireWeapon's hammer query: the query center is three
 // quarters of the attacker's radius ahead of the tee and FindEntities adds
 // the target's radius to half the attacker's radius.

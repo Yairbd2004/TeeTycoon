@@ -154,6 +154,15 @@ throw. A high Defense pet simulates evasive movement and nearby wall hooks
 when an upward throw leads toward freeze. The local route now looks for a
 reachable climb hook staging point when the target is far above. These are
 bounded predictions; the pictured cases still need live gameplay checks.
+The server tracks how long each human tee remains continuously frozen while
+touching freeze tiles. After one second, pets and admin blockers drop that tee
+as a block target regardless of whether the freeze has solid floor support;
+this includes airborne freeze and speed tiles. Leaving the freeze tiles resets
+the timer and makes the player eligible again, even while their ordinary
+out-of-tile freeze timer runs. A respawn resets the timer. Helper targets are
+not affected. The local tile route now rejects uphill air steps beyond jump
+height unless a hookable surface is reachable from a jump position, reducing
+routes that ask the bot to climb empty air.
 
 The checkout at `f43b9c1` stores `TeeTycoon/ddnet-libs` as ordinary tracked files rather than an initialized Git submodule, and some required Windows DLLs are ignored by Git. If configure reports a missing `libcurl.dll`, `zlib1.dll`, or other dependency DLL, restore the Windows x64 DLL files from the pinned `ddnet-libs` commit `c0e6703fbcdbe03df2f26875427ec3951ce4ec21` into the matching `TeeTycoon/ddnet-libs/<library>/windows/lib64/` directories. This checkout also needs `TeeTycoon/cmake/checksummed_extra.txt`, whose contents are in DDNet commit `647a2db7e3581c1deb45ff5dd877a41278a22798`; both items were restored locally for this build and remain ignored.
 

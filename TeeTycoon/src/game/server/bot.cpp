@@ -294,8 +294,7 @@ void CBot::UpdateTarget()
 			}
 		}
 		else if((IsBlockTarget(pTarget, ClientId) || (ThreatActive && ClientId == enemyID)) &&
-			!(GameServer()->IsBotFrozen(pChr) && IsInFreezeFootprint(pChr->GetPos()) &&
-				Collision()->CheckPoint(pChr->GetPos() + vec2(0, 32))) &&
+			!GameServer()->IsPlayerFreezeLocked(ClientId) &&
 			(Dist < BlockDist || (ThreatActive && ClientId == enemyID)))
 		{
 			BlockId = ClientId;
@@ -763,9 +762,7 @@ bool CBot::IsFreezeAt(vec2 Pos)
 
 bool CBot::IsInFreezeFootprint(vec2 Pos)
 {
-	return IsFreezeAt(Pos) || IsFreezeAt(Pos + vec2(0, 14)) ||
-		IsFreezeAt(Pos + vec2(0, 24)) || IsFreezeAt(Pos + vec2(14, 0)) ||
-		IsFreezeAt(Pos - vec2(14, 0));
+	return GameServer()->IsCharacterOnFreezeTile(Pos);
 }
 
 bool CBot::IsDeathAt(vec2 Pos)
@@ -942,6 +939,8 @@ bool CBot::ShouldHoldEnemyHook(const CCharacter *pTarget, vec2 FreezeGoal)
 {
 	if(!pTarget || !m_pPlayer->GetCharacter())
 		return false;
+	if(GameServer()->IsPlayerFreezeLocked(pTarget->GetPlayer()->GetCid()))
+		return false;
 	const vec2 TargetPos = pTarget->GetPos();
 	if(IsInFreezeFootprint(TargetPos) && Collision()->CheckPoint(TargetPos + vec2(0, 32)))
 		return false;
@@ -1048,34 +1047,39 @@ void CBot::OnSkillUpgrade()
 	m_FreezeCrossUntilTick = -1;
 }
 
+bool CBot::HasReachableClimbHook(vec2 Position)
+{
+	if(!g_Config.m_SvBotAllowHook)
+		return false;
+	const vec2 Launch = Position + vec2(0, -72.0f);
+	if(Collision()->TestBox(Launch, CCharacterCore::PhysicalSizeVec2()) ||
+		Collision()->FastIntersectLine(Position, Launch, nullptr, nullptr) || IsDangerous(Launch))
+		return false;
+	for(int Ray = 0; Ray < 24; Ray++)
+	{
+		const vec2 Aim = direction(2.0f * pi * Ray / 24.0f);
+		if(Aim.y > -0.25f)
+			continue;
+		vec2 Hit;
+		const int Tile = Collision()->FastIntersectLine(Launch,
+			Launch + Aim * static_cast<float>(Tuning()->m_HookLength), &Hit, nullptr);
+		if(Tile && Tile != TILE_NOHOOK && Hit.y < Position.y - 95.0f &&
+			distance(Launch, Hit) > 20.0f)
+			return true;
+	}
+	return false;
+}
+
 bool CBot::FindLocalRoute(vec2 Start, vec2 Goal, vec2 *pWaypoint)
 {
 	if(!pWaypoint)
 		return false;
+	const bool StartCanClimb = Goal.y < Start.y - 120.0f && HasReachableClimbHook(Start);
 	// A tile path can walk through open air. When a goal is far above the bot,
 	// first walk to a place where a jump can actually reach a wall hook.
 	if(Goal.y < Start.y - 160.0f && g_Config.m_SvBotAllowHook && Skill(PET_SKILL_RACE) >= 5)
 	{
-		const auto HasClimbHook = [this, Start](vec2 Position) {
-			const vec2 Launch = Position + vec2(0, -72.0f);
-			if(Collision()->TestBox(Launch, CCharacterCore::PhysicalSizeVec2()) ||
-				Collision()->FastIntersectLine(Position, Launch, nullptr, nullptr) || IsDangerous(Launch))
-				return false;
-			for(int Ray = 0; Ray < 24; Ray++)
-			{
-				const vec2 Aim = direction(2.0f * pi * Ray / 24.0f);
-				if(Aim.y > -0.35f)
-					continue;
-				vec2 Hit;
-				const int Tile = Collision()->FastIntersectLine(Launch,
-					Launch + Aim * static_cast<float>(Tuning()->m_HookLength), &Hit, nullptr);
-				if(Tile && Tile != TILE_NOHOOK && Hit.y < Start.y - 125.0f &&
-					distance(Launch, Hit) > 55.0f)
-					return true;
-			}
-			return false;
-		};
-		if(!HasClimbHook(Start))
+		if(!StartCanClimb)
 		{
 			vec2 Best = Start;
 			float BestScore = 1e30f;
@@ -1089,7 +1093,7 @@ bool CBot::FindLocalRoute(vec2 Start, vec2 Goal, vec2 *pWaypoint)
 						(Collision()->IsOnGround(Start, CCharacterCore::PhysicalSize()) &&
 							!Collision()->IsOnGround(Staging, CCharacterCore::PhysicalSize())) ||
 						!SafeTravelSegment(Start, Staging) ||
-						!HasClimbHook(Staging))
+						!HasReachableClimbHook(Staging))
 						continue;
 					const float Score = distance(Start, Staging) + distance(Staging, Goal) * 0.35f;
 					if(Score < BestScore)
@@ -1106,7 +1110,9 @@ bool CBot::FindLocalRoute(vec2 Start, vec2 Goal, vec2 *pWaypoint)
 			}
 		}
 	}
-	if(distance(Start, Goal) < 300.0f && SafeTravelSegment(Start, Goal))
+	if(distance(Start, Goal) < 300.0f &&
+		(Goal.y >= Start.y - 120.0f || StartCanClimb) &&
+		SafeTravelSegment(Start, Goal))
 	{
 		*pWaypoint = Goal;
 		return true;
@@ -1131,6 +1137,7 @@ bool CBot::FindLocalRoute(vec2 Start, vec2 Goal, vec2 *pWaypoint)
 		return vec2((MinX + Index % Width) * 32 + 16.0f, (MinY + Index / Width) * 32 + 16.0f);
 	};
 	std::vector<int8_t> aPassable(Width * Height, -1);
+	std::vector<int8_t> aCanRise(Width * Height, -1);
 	const int Defense = Skill(PET_SKILL_DEFENSE);
 	const auto Passable = [this, &aPassable, &Position, Defense, StartIndex](int Index) {
 		if(aPassable[Index] != -1)
@@ -1144,6 +1151,21 @@ bool CBot::FindLocalRoute(vec2 Start, vec2 Goal, vec2 *pWaypoint)
 				!IsDangerous(Pos + vec2(14, 0)) && !IsDangerous(Pos - vec2(14, 0)));
 		aPassable[Index] = Clear && Safe ? 1 : 0;
 		return aPassable[Index] == 1;
+	};
+	const auto CanRise = [this, &aCanRise, &Position](int Index) {
+		if(aCanRise[Index] != -1)
+			return aCanRise[Index] == 1;
+		const vec2 Pos = Position(Index);
+		for(float Below = 32.0f; Below <= 128.0f; Below += 16.0f)
+		{
+			if(Collision()->CheckPoint(Pos + vec2(0, Below)))
+			{
+				aCanRise[Index] = 1;
+				return true;
+			}
+		}
+		aCanRise[Index] = HasReachableClimbHook(Pos) ? 1 : 0;
+		return aCanRise[Index] == 1;
 	};
 	if(!Passable(GoalIndex))
 		return false;
@@ -1178,11 +1200,13 @@ bool CBot::FindLocalRoute(vec2 Start, vec2 Goal, vec2 *pWaypoint)
 			const int Next = NY * Width + NX;
 			if(aClosed[Next] || !Passable(Next))
 				continue;
+			if(s_aDy[Direction] < 0 && !CanRise(Next))
+				continue;
 			if(s_aDx[Direction] && s_aDy[Direction] &&
 				(!Passable(Y * Width + NX) || !Passable(NY * Width + X)))
 				continue;
 			const float Hazard = Defense < 7 && IsDangerous(Position(Next)) ? 100.0f : 0.0f;
-			const float Upward = s_aDy[Direction] < 0 ? 3.0f : 0.0f;
+			const float Upward = s_aDy[Direction] < 0 ? 8.0f : 0.0f;
 			const float NextCost = aCost[Current] + (s_aDx[Direction] && s_aDy[Direction] ? 14.0f : 10.0f) + Hazard + Upward;
 			if(NextCost >= aCost[Next])
 				continue;
@@ -1209,6 +1233,8 @@ bool CBot::FindLocalRoute(vec2 Start, vec2 Goal, vec2 *pWaypoint)
 	for(int i = 1; i <= LookAhead; i++)
 	{
 		const vec2 Candidate = i == static_cast<int>(vPath.size()) - 1 ? Goal : Position(vPath[i]);
+		if(Candidate.y < Start.y - 120.0f && !StartCanClimb)
+			continue;
 		if(SafeTravelSegment(Start, Candidate))
 			Best = i;
 	}
@@ -1925,6 +1951,9 @@ void CBot::Tick()
 		m_InputData.m_TargetY = m_Target.y;
 	}
 	DefendAgainstUpwardThrow();
+	const int HookedPlayer = pMe->HookedPlayer();
+	if(!m_Rescuing && HookedPlayer >= 0 && GameServer()->IsPlayerFreezeLocked(HookedPlayer))
+		m_InputData.m_Hook = 0;
 
 
 

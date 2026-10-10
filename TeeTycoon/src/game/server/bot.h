@@ -200,6 +200,7 @@ public:
 	bool CanUseWeapon(int Weapon) const;
 	bool CanHammerHit(CCharacter *pTarget);
 	bool FindLocalRoute(vec2 Start, vec2 Goal, vec2 *pWaypoint);
+	bool HasReachableClimbHook(vec2 Position);
 	bool FindRescueRoute(int TargetId, vec2 TargetPos, vec2 *pWaypoint);
 	bool SafeTravelSegment(vec2 Start, vec2 End);
 	bool HasFreezeBelow(vec2 Pos, float MaxDistance);
