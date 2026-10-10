@@ -181,7 +181,7 @@ Be aware that DDNet searches configured storage paths in order. The default `$DA
 
 LAN check on the original development computer: the 20.1.1 server build completed, started with the staged TeeTycoon config/name, and bound UDP 8303. A Private-only Windows Defender Firewall rule for this exact executable is enabled on the trusted Private Wi-Fi profile. LAN listing was not verified from a second device; if it still does not appear, test direct IPv4:8303 connectivity and check client/server network profiles and firewall rules.
 
-The normal browser game type is `TT`. The tracked server override sets `sv_test_cmds 0`, so the running server is not in DDNet test mode and does not enable test/cheat commands. If test mode is deliberately enabled for development, the browser label is `TestTT`.
+The normal browser game type is `TT`. The tracked server override sets `sv_test_cmds 1` so the built-in admin RCON commands are available; DDNet may show the server as `TestTT` while this setting is enabled.
 
 Runtime databases and server configs are not source files and must be backed up separately when moving machines. The development server keeps `Accounts.sqlite` beside `TeeTycoon Server/DDNet-Server.exe`; it stores accounts, pets, pet relations, and the event-vote cooldown. Active event registration is transient server state and does not need a file. A fresh clone does **not** contain ignored `out/` data. Before using a new build with existing player accounts, copy the database and local server config from a verified backup and keep an untouched backup. Never commit live databases, passwords, or private server configuration.
 
@@ -203,7 +203,7 @@ Deploy the resulting `teeworlds_srv`, `storage.cfg`, and staged `data/` together
 
 ## Production release archives
 
-When asked for a production build, create a Linux x86-64 `.tar.gz` archive in `prod-releases/` named `TeeTycoon-vX.Y.Z-linux-amd64.tar.gz`. Keep the archive's contents at its root so extraction directly into `/home/container` places `teeworlds_srv`, `storage.cfg`, and `data/` beside one another. Store the executable and launcher with mode `755`; ordinary files use `644`. Choose the next TeeTycoon release version based on the scope of changes, independently of the upstream DDNet version. Do not include development databases. The first packaged release was `TeeTycoon-v0.1.0-linux-amd64.tar.gz`; the current map release is `TeeTycoon-v0.2.4-linux-amd64.tar.gz`.
+When asked for a production build, create a Linux x86-64 `.tar.gz` archive in `prod-releases/` named `TeeTycoon-vX.Y.Z-linux-amd64.tar.gz`. Keep the archive's contents at its root so extraction directly into `/home/container` places `teeworlds_srv`, `storage.cfg`, and `data/` beside one another. Store the executable and launcher with mode `755`; ordinary files use `644`. Choose the next TeeTycoon release version based on the scope of changes, independently of the upstream DDNet version. Do not include development databases. The first packaged release was `TeeTycoon-v0.1.0-linux-amd64.tar.gz`; `TeeTycoon-v0.2.4-linux-amd64.tar.gz` is the previous map release. Version `v0.2.5` includes the updated bot navigation and RCON command configuration.
 
 ## Source map for catching up
 
