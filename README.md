@@ -12,3 +12,5 @@ The original development computer's ignored `out` build and account data are not
 For the upstream upgrade and build workflow, see [UPGRADING.md](UPGRADING.md).
 
 For new-computer setup, build requirements, runtime data, and Codex handoff instructions, see [README-INSTALL-AND-STANDARD.md](README-INSTALL-AND-STANDARD.md).
+
+For player and admin command syntax, see [commands.md](commands.md).
