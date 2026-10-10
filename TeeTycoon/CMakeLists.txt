@@ -1751,13 +1751,14 @@ set(EXPECTED_DATA
   mapres/winter_mountains.png
   mapres/winter_mountains2.png
   mapres/winter_mountains3.png
+  maps/Copy\ Love\ Box-TT.map
   maps/Gold\ Mine.map
   maps/LearnToPlay.map
   maps/Sunny\ Side\ Up.map
   maps/TeeTycoon.map
-  maps/TeeTycoonV1.map
   maps/Tsunami.map
   maps/Tutorial.map
+  maps/blmapV3ROYAL-TT.map
   maps/coverage.map
   maps/ctf1.map
   maps/ctf2.map
@@ -1773,13 +1774,14 @@ set(EXPECTED_DATA
   maps/dm8.map
   maps/dm9.map
   maps/license.txt
+  maps7/Copy\ Love\ Box-TT.map
   maps7/Gold\ Mine.map
   maps7/LearnToPlay.map
   maps7/Sunny\ Side\ Up.map
   maps7/TeeTycoon.map
-  maps7/TeeTycoonV1.map
   maps7/Tsunami.map
   maps7/Tutorial.map
+  maps7/blmapV3ROYAL-TT.map
   maps7/readme.txt
   menuimages/demos.png
   menuimages/editor.png

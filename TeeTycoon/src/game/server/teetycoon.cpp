@@ -30,6 +30,7 @@
 #include <vector>
 
 static constexpr int MAX_HOUSE_LEVEL = 4;
+static constexpr int HOUSE_TELEOUT_NUMBER = 254;
 
 static constexpr int PetWeaponBit(int Weapon)
 {
@@ -2531,7 +2532,7 @@ void CGameContext::ConHome(IConsole::IResult* pResult, void* pUserData)
 			TeleOut = pPlayer->house;
 		}
 		//the player account has ID var, so TeleIn will be the last ID var + 1. (database...)
-		if(TeleOut < 0 || TeleOut >= (int)pSelf->Collision()->TeleOuts(1).size())
+		if(TeleOut < 0 || TeleOut >= (int)pSelf->Collision()->TeleOuts(HOUSE_TELEOUT_NUMBER - 1).size())
 		{
 			pSelf->SendChatTarget(pResult->m_ClientId, "This house entrance is unavailable.");
 			return;
@@ -2539,7 +2540,7 @@ void CGameContext::ConHome(IConsole::IResult* pResult, void* pUserData)
 		if(pPlayer->m_HouseVisitHost >= 0)
 			pSelf->EndHouseVisit(pResult->m_ClientId);
 		pSelf->EndHouseVisitsOfHost(pResult->m_ClientId);
-		pSelf->MovePlayerAndPet(pResult->m_ClientId, pResult->m_ClientId + 1, pSelf->Collision()->TeleOuts(1)[TeleOut]);
+		pSelf->MovePlayerAndPet(pResult->m_ClientId, pResult->m_ClientId + 1, pSelf->Collision()->TeleOuts(HOUSE_TELEOUT_NUMBER - 1)[TeleOut]);
 	}
 	else
 	{
@@ -2650,7 +2651,7 @@ void CGameContext::ConRegister(IConsole::IResult *pResult, void *pUserData)
 					//tele 1 saved for the main map, so its id + 1 since we start from 2.
 					//teleport the player to his tp number(to his own house).
 															pController->Teams().SetForceCharacterTeam(pPlayer->GetCid(), pPlayer->GetCid() + 1);
-					pSelf->Teleport(pChr, pSelf->Collision()->TeleOuts(1)[0]);
+					pSelf->Teleport(pChr, pSelf->Collision()->TeleOuts(HOUSE_TELEOUT_NUMBER - 1)[0]);
 					//print the register information.
 					pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "chatresp",
 						"Your Account has been created.");

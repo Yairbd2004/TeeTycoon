@@ -1,17 +1,14 @@
-# TeeTycoonV1 map
+# TeeTycoon map edits
 
-`TeeTycoon/data/maps/TeeTycoonV1.map` is the editable DDNet map. Its artwork is embedded, so the server and clients do not need a separate tileset file. The server config selects this map by default. The `maps7` copy is for 0.7 clients.
+The server ships with two versions of the supplied block maps:
 
-The map has a lobby, an open block field with side and floor freeze pockets, a race route below it, a VIP lounge, five event rooms, and five private houses. The block field uses the broad spacing and short platforms seen in the supplied reference maps; its layout and artwork are original.
+- `blmapV3ROYAL-TT` is the default.
+- `Copy Love Box-TT` is available as an alternate map.
 
-| House level | Room | Farm strip |
-| --- | --- | ---: |
-| 0 | Shack | 8 tiles |
-| 1 | Loft | 13 tiles |
-| 2 | Suite | 19 tiles |
-| 3 | Court | 25 tiles |
-| 4 | Palace | 37 tiles |
+Each map keeps its original race and block layout. The existing freeze, teleporter, front, and speedup layers are preserved; the new rooms sit in empty areas of the original maps. Each one has five private houses, from a compact starter home through a large palace, plus a separate VIP room. The house shells grow in size and detail as the house level rises, and their art uses the map's own tilesets. The farm strips grow with the house level as well.
 
-House exits all use teleporter number 2, in left to right order on the same row. The server's `/home` command indexes these exits by house level. Teleporter 1 returns the public race to the lobby; 3 enters the race from the lobby. The five event rooms use teleporter numbers 254 through 250 for Survival, Race, Deathmatch, Freeze Race, and FNG.
+The house exits use tele-out number 254. TeeTycoon reserves that number so it won't mix with the map's existing race or event teleports. The five house exits are ordered left to right, matching `/home 0` through `/home 4`.
 
-To rebuild the map, run `python map_design/build_teetycoon_v1.py` from the repository root with Pillow installed. The script writes the map, embedded atlas source, and two design previews. Run DDNet's `map_convert_07` on the result to update `TeeTycoon/data/maps7/TeeTycoonV1.map`.
+The edited maps are committed under `TeeTycoon/data/maps`; their DDNet 0.7 conversions are under `TeeTycoon/data/maps7`. CMake stages both maps into the server and client data folders.
+
+`edit_reference_maps.py` can recreate the edits if the original files are present at `map_examples/blmapV3ROYAL.map` and `map_examples/Copy Love Box.map`. It preserves the source maps and writes the TeeTycoon copies. It needs Python 3, NumPy, and the small DATA-v4 helper in `ddmap.py`. After editing, use DDNet's `map_convert_07` to refresh the two 0.7 copies.

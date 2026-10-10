@@ -29,7 +29,7 @@ The in-game vote menu also has Shop, Pet, Cosmetics, Travel, and Account pages. 
 | `/accept`, `/decline` | Accept or decline a house invitation. An accepted visit moves you and your pet into the host's house team. |
 | `/leave_house` | Return from a house visit to your previous position and team. |
 
-Shop quick reference: farm/money tile has 100 levels; house has levels 0–4 (five rooms on TeeTycoonV1); VIP has levels 0–5. Rebirth requires house level 4 and resets money, farm, house, and VIP. A pet costs $1,000,000 and ownership is saved. Rainbow costs $10,000 and bloody costs $50,000; both effects last until death or until turned off.
+Shop quick reference: farm/money tile has 100 levels; house has levels 0–4, with five rooms on both `blmapV3ROYAL-TT` and `Copy Love Box-TT`. VIP has levels 0–5. Rebirth requires house level 4 and resets money, farm, house, and VIP. A pet costs $1,000,000 and ownership is saved. Rainbow costs $10,000 and bloody costs $50,000; both effects last until death or until turned off.
 
 ### Pet
 
