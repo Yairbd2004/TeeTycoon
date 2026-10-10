@@ -1844,7 +1844,8 @@ void CGameClient::OnNewSnapshot(bool DummySwapped)
 					// calculate team-balance
 					if(pInfo->m_Team != TEAM_SPECTATORS)
 					{
-						m_Snap.m_aTeamSize[pInfo->m_Team]++;
+						if(pInfo->m_Latency >= 0)
+							m_Snap.m_aTeamSize[pInfo->m_Team]++;
 						if(!m_aStats[pInfo->m_ClientId].IsActive())
 							m_aStats[pInfo->m_ClientId].JoinGame(Client()->GameTick(g_Config.m_ClDummy));
 					}

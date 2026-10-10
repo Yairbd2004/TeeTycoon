@@ -143,7 +143,11 @@ database migration. If laser is owned, distant rescues prefer it; close rescues
 use hammer. Ninja stays in inventory and is activated only for short travel
 bursts when the owner is far away, then waits through a cooldown.
 The portable decision rules are in `TeeTycoon/src/game/server/bot_ai/`;
-`bot.cpp` and `botengine.cpp` remain the DDNet adapter and pathfinder.
+`bot.cpp` and `botengine.cpp` remain the DDNet adapter and pathfinder. On
+Copy Love Box-TT, blockers score supported side and lower freeze tiles higher,
+then use aligned hooks, shotgun knockback, or a safe grenade terrain blast to
+move targets toward them. Blocker bots within 1000 units of the same eligible
+real opponent temporarily treat one another as allies.
 
 The separate [TeeTycoon bots repository](https://github.com/Yairbd2004/TeeTycoon-bots) carries a copy of those rules and
 the TeeTycoon adapter, plus a short installation script and DDNet porting
@@ -203,7 +207,7 @@ Deploy the resulting `teeworlds_srv`, `storage.cfg`, and staged `data/` together
 
 ## Production release archives
 
-When asked for a production build, create a Linux x86-64 `.tar.gz` archive in `prod-releases/` named `TeeTycoon-vX.Y.Z-linux-amd64.tar.gz`. Keep the archive's contents at its root so extraction directly into `/home/container` places `teeworlds_srv`, `storage.cfg`, and `data/` beside one another. Store the executable and launcher with mode `755`; ordinary files use `644`. Choose the next TeeTycoon release version based on the scope of changes, independently of the upstream DDNet version. Do not include development databases. The first packaged release was `TeeTycoon-v0.1.0-linux-amd64.tar.gz`; `TeeTycoon-v0.2.4-linux-amd64.tar.gz` is the previous map release. Version `v0.2.5` includes the updated bot navigation and RCON command configuration.
+When asked for a production build, create a Linux x86-64 `.tar.gz` archive in `prod-releases/` named `TeeTycoon-vX.Y.Z-linux-amd64.tar.gz`. Keep the archive's contents at its root so extraction directly into `/home/container` places `teeworlds_srv`, `storage.cfg`, and `data/` beside one another. Store the executable and launcher with mode `755`; ordinary files use `644`. Choose the next TeeTycoon release version based on the scope of changes, independently of the upstream DDNet version. Do not include development databases. The first packaged release was `TeeTycoon-v0.1.0-linux-amd64.tar.gz`; `TeeTycoon-v0.2.4-linux-amd64.tar.gz` is the previous map release. Version `v0.2.5` includes the updated bot navigation and RCON command configuration; `v0.2.6` adds Copy Love Box-TT side and lower freeze tactics plus temporary blocker cooperation around nearby human opponents.
 
 ## Source map for catching up
 
@@ -220,7 +224,7 @@ Start with the current `dev` diff/log, then these locations. Search for command 
 - `TeeTycoon/src/game/server/gamecontext.{h,cpp}` — server context, initialization, hooks, commands and shared mode state.
 - `TeeTycoon/src/game/server/player.{h,cpp}` and `entities/character.{h,cpp}` — per-player data and gameplay integration.
 - `TeeTycoon/src/game/server/ddracecommands.cpp`, `ddracechat.cpp`, and `scoreworker.cpp` — commands/chat and score/database-adjacent integration; inspect the current implementation before making assumptions about persistence.
-- `TeeTycoon/src/game/server/bot.cpp`, `botengine.cpp`, `ai/` — bot and AI behavior.
+- `TeeTycoon/src/game/server/bot.cpp`, `botengine.cpp`, `bot_ai/` — bot and AI behavior, map-aware freeze goals, and weapon tactics.
 - `TeeTycoon/src/game/server/server.cpp`, `src/engine/server.*`, `src/engine/shared/config_variables.h` — server lifecycle and custom server/config integration.
 - `TeeTycoon/src/game/collision.{h,cpp}`, `mapitems.{h,cpp}`, and `src/game/editor/` — custom map tile/entity definitions and editor integration.
 - `TeeTycoon/src/game/client/` — client-side changes. The last client compile found and removed stale fragments in menus, skin loading, and snapshot processing; the corresponding fixed files are in the current `dev` history.
@@ -247,6 +251,8 @@ The last `rg` command is only a starting point; inspect call paths, persistence,
 6. Keep this guide concise enough to use as a handoff, but specific enough to reproduce setup. Separate verified facts from plans or unverified behavior.
 
 Recent runtime/build note: bot-engine grid and segment setup happens at map initialization, while triangle navigation-graph/path setup is deferred until a bot is first added. The all-pairs shortest-path computation uses BFS rather than cubic Floyd–Warshall. This keeps normal server startup prompt and avoids allocating snapshot IDs for graph/triangle data that is not snapped. Adding a bot can still incur the one-time map-navigation graph generation cost; profile that path before increasing bot use.
+
+For crowded bot sessions, blocker spawning is now paced at one bot per game tick, mass teleports move at most four characters per tick, and AI planning is staggered across ticks. Copy Love Box-TT grenade trajectory searches are limited to nearby fights, use fewer angle samples, and refresh less often. Pets and blockers remain normal snapshot characters so stock clients can render them; their `PlayerInfo` latency is set to `-1` as a TeeTycoon-client marker, and the TeeTycoon scoreboard omits those entries while keeping the character snapshot intact. A stock client that does not have the TeeTycoon scoreboard change may display a negative ping for bots.
 
 ## Prompt for a Codex session on another computer
 

@@ -1218,6 +1218,31 @@ void CGameContext::OnTick()
 {
 	DeleteBot();
 	UpdateFreezeTileStates();
+	// Spread administrative bulk work across ticks to avoid one-frame CPU spikes.
+	if(m_PendingBlockerSpawnCount > 0)
+	{
+		const int BotId = FindFreeBotId(m_PendingBlockerSpawnVirtual);
+		if(BotId < 0 || !AddBot(BotId, -1, false, m_PendingBlockerSpawnVirtual))
+			m_PendingBlockerSpawnCount = 0;
+		else
+			--m_PendingBlockerSpawnCount;
+	}
+	for(int Processed = 0; Processed < 4 && m_PendingMassTeleportIndex < m_vPendingMassTeleports.size(); ++Processed)
+	{
+		const SQueuedMassTeleport &Entry = m_vPendingMassTeleports[m_PendingMassTeleportIndex++];
+		CCharacter *pCharacter = GetPlayerChar(Entry.m_ClientId);
+		if(!pCharacter || pCharacter->m_SpawnTick != Entry.m_SpawnTick)
+			continue;
+		Teleport(pCharacter, Entry.m_Position, true);
+		pCharacter->ResetJumps();
+		pCharacter->Unfreeze();
+		pCharacter->ResetVelocity();
+	}
+	if(m_PendingMassTeleportIndex >= m_vPendingMassTeleports.size())
+	{
+		m_vPendingMassTeleports.clear();
+		m_PendingMassTeleportIndex = 0;
+	}
 	for(auto &pPlayer : m_apPlayers)
 	{
 		if(pPlayer && pPlayer->IsBot() && pPlayer->m_pBot)
@@ -4290,6 +4315,9 @@ void CGameContext::RegisterChatCommands()
 
 void CGameContext::OnInit(const void *pPersistentData)
 {
+	m_vPendingMassTeleports.clear();
+	m_PendingMassTeleportIndex = 0;
+	m_PendingBlockerSpawnCount = 0;
 	// Event phases run on game ticks. SQLite stores the cooldown and active-event
 	// marker, which is cleared here so an interrupted server start can recover.
 	m_EventState = 0;

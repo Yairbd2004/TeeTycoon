@@ -373,7 +373,12 @@ void CPlayer::Snap(int SnappingClient)
 	Server()->SnapNewItem(TranslatedId, m_ClientInfo);
 
 	int SnappingClientVersion = GameServer()->GetClientVersion(SnappingClient);
+	// The TeeTycoon client uses negative latency as a private bot marker. Keep
+	// PlayerInfo present so the tee remains renderable, while the scoreboard can
+	// omit pets and virtual/slot-backed bots. Other clients still see the bots.
 	int Latency = SnappingClient == SERVER_DEMO_CLIENT ? m_Latency.m_Min : GameServer()->m_apPlayers[SnappingClient]->m_aCurLatency[m_ClientId];
+	if(m_IsBot)
+		Latency = -1;
 	int Score = GameServer()->m_pController->SnapPlayerScore(SnappingClient, this);
 
 	if(!Server()->IsSixup(SnappingClient))

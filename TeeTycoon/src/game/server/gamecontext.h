@@ -27,6 +27,8 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
 /*
 	Tick
@@ -150,6 +152,16 @@ class CGameContext : public IGameServer
 	void UpdateFreezeTileStates();
 
 	bool m_Resetting;
+	struct SQueuedMassTeleport
+	{
+		int m_ClientId;
+		vec2 m_Position;
+		int m_SpawnTick;
+	};
+	std::vector<SQueuedMassTeleport> m_vPendingMassTeleports;
+	size_t m_PendingMassTeleportIndex = 0;
+	int m_PendingBlockerSpawnCount = 0;
+	bool m_PendingBlockerSpawnVirtual = false;
 
 	static std::optional<std::vector<int>> ClientsForVictim(int ClientId, const char *pVictim, void *pUser);
 	static void CommandCallback(int ClientId, int FlagMask, const char *pCmd, IConsole::IResult *pResult, void *pUser);

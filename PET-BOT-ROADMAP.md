@@ -159,6 +159,25 @@ freeze tiles or respawns. The nearby tile route also requires an uphill step
 beyond jump height to have a reachable hookable surface. Both changes still
 need a live gameplay pass against moving targets and the reported ledges.
 
+For Copy Love Box-TT, the blocker planner now gives supported side and lower
+freeze tiles a stronger preference. If a direct hook or shotgun line cannot
+move a target usefully, it searches grenade trajectories for a terrain impact
+that blasts the target toward the chosen freeze tile while keeping the pet and
+its owner outside the blast radius. Nearby blocker bots temporarily whitelist
+each other when they share an eligible real opponent within 1000 units, and
+resume duels when that local fight ends. Compile and production packaging are
+included in this pass; live play and crowded-server CPU checks remain open.
+
+Bulk load handling: blocker commands queue up to 32 bots and create one per game
+tick; `tt_admin_teleport_all` and `_xy` queue destinations and relocate up to
+four characters per tick. AI thinking is staggered by bot ID across adjacent
+ticks. The Copy Love Box-TT grenade trajectory search is restricted to fights
+within 450 units, samples 19 directions, caps simulation at 0.9 seconds, and
+replans every 25 ticks. Bot/pet characters keep their normal network snapshots;
+the TeeTycoon client uses negative snapshot latency as a bot marker to hide
+them from scoreboard rows without hiding them in the world. CPU impact still
+needs confirmation on a live server with 32 bots and a crowded teleport.
+
 Keep the skill rules and decision policy in `TeeTycoon/src/game/server/bot_ai/`
 without DDNet headers, so other mods can copy them. `bot.cpp` translates
 DDNet characters and collision results into those decisions. The older bot

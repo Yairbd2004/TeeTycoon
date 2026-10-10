@@ -229,11 +229,51 @@ vec2 CBot::ClosestCharacter()
 
 
 
+bool CBot::IsNearbyBlockerAlly(const CPlayer *pTarget) const
+{
+	if(!m_pPlayer->m_IsBlocker || !pTarget || !pTarget->m_IsBlocker || !pTarget->m_pBot || owner >= 0)
+		return false;
+	constexpr float TEAM_UP_RANGE = 1000.0f;
+	const float TeamUpRangeSq = TEAM_UP_RANGE * TEAM_UP_RANGE;
+	const vec2 MyPos = m_pPlayer->GetCharacter() ? m_pPlayer->GetCharacter()->GetPos() : vec2(0, 0);
+	const vec2 AllyPos = pTarget->GetCharacter() ? pTarget->GetCharacter()->GetPos() : vec2(0, 0);
+	if(!m_pPlayer->GetCharacter() || !pTarget->GetCharacter())
+		return false;
+	const int Now = m_pGameServer->Server()->Tick();
+	if(m_BlockerAllyCacheTick != Now)
+	{
+		m_BlockerAllyCacheTick = Now;
+		m_BlockerAllyHumanId = -1;
+		float NearestHumanDist = TeamUpRangeSq;
+		for(int ClientId = 0; ClientId < MAX_CLIENTS; ClientId++)
+		{
+			CPlayer *pHuman = m_pGameServer->m_apPlayers[ClientId];
+			if(!pHuman || pHuman->m_IsBot || !pHuman->GetCharacter() ||
+				m_pGameServer->IsPlayerFreezeLocked(ClientId) ||
+				m_HelpNames.contains(m_pGameServer->Server()->ClientName(ClientId)))
+				continue;
+			const float HumanDist = distance_squared(MyPos, pHuman->GetCharacter()->GetPos());
+			if(HumanDist < NearestHumanDist)
+			{
+				NearestHumanDist = HumanDist;
+				m_BlockerAllyHumanId = ClientId;
+			}
+		}
+	}
+	if(m_BlockerAllyHumanId < 0 || m_BlockerAllyHumanId >= MAX_CLIENTS ||
+		pTarget->m_pBot->m_HelpNames.contains(m_pGameServer->Server()->ClientName(m_BlockerAllyHumanId)))
+		return false;
+	CPlayer *pHuman = m_pGameServer->m_apPlayers[m_BlockerAllyHumanId];
+	return pHuman && pHuman->GetCharacter() &&
+		distance_squared(AllyPos, pHuman->GetCharacter()->GetPos()) <= TeamUpRangeSq;
+}
+
 bool CBot::IsHelpTarget(const CPlayer *pTarget, int TargetId) const
 {
 	if(TargetId == owner && owner >= 0)
 		return true;
-	return pTarget && m_HelpNames.contains(m_pGameServer->Server()->ClientName(TargetId));
+	return pTarget && (m_HelpNames.contains(m_pGameServer->Server()->ClientName(TargetId)) ||
+		IsNearbyBlockerAlly(pTarget));
 }
 
 bool CBot::IsBlockTarget(const CPlayer *pTarget, int TargetId) const
@@ -318,7 +358,8 @@ void CBot::UpdateTarget()
 			(pTarget->m_IsBot && !m_pPlayer->m_IsBlocker))
 			continue;
 		CCharacter *pChr = pTarget->GetCharacter();
-		const bool BlockerDuel = m_pPlayer->m_IsBlocker && pTarget->m_IsBlocker;
+		const bool BlockerDuel = m_pPlayer->m_IsBlocker && pTarget->m_IsBlocker &&
+			!IsHelpTarget(pTarget, ClientId);
 		if(!m_pPlayer->m_IsBlocker && pChr->Team() != m_pPlayer->GetCharacter()->Team())
 			continue;
 		const float Dist = distance_squared(MyPos, pChr->GetPos());
@@ -1178,6 +1219,8 @@ bool CBot::FindBlockFreezeGoal(vec2 TargetPos, int RemainingFreezeTicks, vec2 *p
 	SGoal aBest[2];
 	const vec2 MyPos = m_pPlayer->GetCharacter()->GetPos();
 	const float HookLength = static_cast<float>(Tuning()->m_HookLength);
+	const bool CopyLoveBox = GameServer()->Map() &&
+		str_comp(GameServer()->Map()->BaseName(), "Copy Love Box-TT") == 0;
 	for(int Pass = 0; Pass < 2; Pass++)
 	{
 		for(int Y = std::max(0, CenterY - Reach); Y <= std::min(Height - 1, CenterY + Reach); Y++)
@@ -1204,9 +1247,16 @@ bool CBot::FindBlockFreezeGoal(vec2 TargetPos, int RemainingFreezeTicks, vec2 *p
 					std::max(1.0f, static_cast<float>(Tuning()->m_HookFireSpeed));
 				const float PullTicks = Dist / std::max(1.0f, static_cast<float>(Tuning()->m_HookDragSpeed)) + 14.0f;
 				const float TravelTicks = ApproachTicks + HookTicks + PullTicks;
-				const float Score = Urgent ? TravelTicks * 12.0f + Dist * 0.1f -
+				float MapPreference = 0.0f;
+				if(CopyLoveBox)
+				{
+					const bool Side = std::abs(Offset.x) > 32.0f && std::abs(Offset.x) >= std::abs(Offset.y) * 0.72f;
+					const bool Below = Offset.y > 32.0f;
+					MapPreference = (Side ? 90.0f : 0.0f) + (Below ? 120.0f : 0.0f);
+				}
+				const float Score = Urgent ? TravelTicks * 12.0f + Dist * 0.1f - MapPreference -
 					(Supported && TravelTicks <= TimeBudget ? 80.0f : 0.0f) :
-					bot_ai::FreezeGoalScore(Dist, Supported, TravelTicks, TimeBudget);
+					bot_ai::FreezeGoalScore(Dist, Supported, TravelTicks, TimeBudget) - MapPreference;
 				if(Score < aBest[Pass].m_Score)
 				{
 					aBest[Pass].m_Score = Score;
@@ -1236,6 +1286,112 @@ bool CBot::FindBlockFreezeGoal(vec2 TargetPos, int RemainingFreezeTicks, vec2 *p
 		return false;
 	*pGoal = pBest->m_Pos;
 	*pSupported = pBest->m_Supported;
+	return true;
+}
+
+bool CBot::FindBlockGrenadeAim(CCharacter *pTarget, vec2 FreezeGoal, vec2 *pAim)
+{
+	const int TargetId = pTarget ? pTarget->GetPlayer()->GetCid() : -1;
+	const int Now = GameServer()->Server()->Tick();
+	const bool CopyLoveBox = GameServer()->Map() &&
+		str_comp(GameServer()->Map()->BaseName(), "Copy Love Box-TT") == 0;
+	if(!CopyLoveBox || !pTarget || !pAim || !CanUseWeapon(WEAPON_GRENADE) || !m_pPlayer->GetCharacter())
+	{
+		m_HasBlockGrenadeAim = false;
+		return false;
+	}
+	if(m_LastBlockGrenadePlanTick >= 0 && Now - m_LastBlockGrenadePlanTick < 25 &&
+		m_BlockGrenadeTargetId == TargetId &&
+		distance_squared(m_BlockGrenadeTargetPos, pTarget->GetPos()) <= 40.0f * 40.0f &&
+		distance_squared(m_BlockGrenadeGoal, FreezeGoal) <= 8.0f * 8.0f)
+	{
+		if(m_HasBlockGrenadeAim)
+			*pAim = m_BlockGrenadeAim;
+		return m_HasBlockGrenadeAim;
+	}
+
+	m_LastBlockGrenadePlanTick = Now;
+	m_BlockGrenadeTargetId = TargetId;
+	m_BlockGrenadeTargetPos = pTarget->GetPos();
+	m_BlockGrenadeGoal = FreezeGoal;
+	m_HasBlockGrenadeAim = false;
+
+	CCharacter *pMe = m_pPlayer->GetCharacter();
+	const vec2 MyPos = pMe->GetPos();
+	const vec2 ToFreeze = normalize(FreezeGoal - pTarget->GetPos());
+	const float Distance = distance(MyPos, pTarget->GetPos());
+	if(length(ToFreeze) < 0.5f || Distance < 170.0f || Distance > 450.0f)
+		return false;
+	CPlayer *pOwner = owner >= 0 && owner < MAX_CLIENTS ? GameServer()->m_apPlayers[owner] : nullptr;
+	if(pOwner && pOwner->GetCharacter() && distance(MyPos, pOwner->GetCharacter()->GetPos()) < 160.0f)
+		return false;
+
+	const float TickSpeed = static_cast<float>(GameServer()->Server()->TickSpeed());
+	const float Curvature = Tuning()->m_GrenadeCurvature;
+	const float Speed = Tuning()->m_GrenadeSpeed;
+	const int MaxTicks = std::clamp(static_cast<int>(Tuning()->m_GrenadeLifetime * TickSpeed), 1,
+		static_cast<int>(TickSpeed * 0.9f));
+	float BestScore = 1e30f;
+	vec2 BestAim(0, 0);
+	const vec2 IdealBlast = pTarget->GetPos() - ToFreeze * 88.0f;
+	const float BaseAngle = angle(IdealBlast - MyPos);
+	// Sample a tight arc around the intended blast point. The trajectory adds
+	// gravity, so allow substantial vertical adjustment without sweeping every
+	// direction on the compass for every blocker.
+	for(int DirectionIndex = -9; DirectionIndex <= 9; DirectionIndex++)
+	{
+		const vec2 Direction = direction(BaseAngle + DirectionIndex * 2.0f * pi / 36.0f);
+		const vec2 StartPos = MyPos + Direction * pMe->GetProximityRadius() * 0.75f;
+		vec2 Previous = StartPos;
+		for(int Tick = 1; Tick <= MaxTicks; Tick++)
+		{
+			const float Time = Tick / TickSpeed;
+			const vec2 Current = CalcPos(StartPos, Direction, Curvature, Speed, Time);
+			const vec2 TargetAtTick = pTarget->GetPos() + pTarget->Core()->m_Vel * std::min(Time, 0.5f);
+			const vec2 Segment = Current - Previous;
+			const float SegmentLengthSq = length_squared(Segment);
+			const float SegmentFraction = SegmentLengthSq > 0.001f ?
+				std::clamp(dot(TargetAtTick - Previous, Segment) / SegmentLengthSq, 0.0f, 1.0f) : 0.0f;
+			const vec2 ClosestOnSegment = Previous + Segment * SegmentFraction;
+			// A direct grenade collision explodes at the tee's center, where the
+			// radial force has no useful direction. Only plan terrain detonations.
+			if(distance_squared(ClosestOnSegment, TargetAtTick) < 28.0f * 28.0f)
+				break;
+			vec2 ImpactPos;
+			vec2 NewPos;
+			const int CollisionTile = Collision()->IntersectLine(Previous, Current, &ImpactPos, &NewPos);
+			if(CollisionTile)
+			{
+				const vec2 TargetAtImpact = TargetAtTick;
+				const vec2 PushDirection = normalize(TargetAtImpact - ImpactPos);
+				const float BlastDistance = distance(TargetAtImpact, ImpactPos);
+				const float Alignment = dot(PushDirection, ToFreeze);
+				const bool SelfSafe = distance(MyPos, ImpactPos) >= 145.0f;
+				const bool OwnerSafe = !pOwner || !pOwner->GetCharacter() ||
+					distance(pOwner->GetCharacter()->GetPos(), ImpactPos) >= 145.0f;
+				if(BlastDistance >= 52.0f && BlastDistance <= 128.0f && Alignment >= 0.68f &&
+					SelfSafe && OwnerSafe)
+				{
+					const float DesiredDistanceError = std::abs(BlastDistance - 88.0f);
+					const vec2 IdealBlast = TargetAtImpact - ToFreeze * 88.0f;
+					const float Score = DesiredDistanceError + (1.0f - Alignment) * 170.0f +
+						distance(ImpactPos, IdealBlast) * 0.28f + Time * 18.0f;
+					if(Score < BestScore)
+					{
+						BestScore = Score;
+						BestAim = Direction * 1000.0f;
+					}
+				}
+				break;
+			}
+			Previous = Current;
+		}
+	}
+	if(BestScore >= 1e30f)
+		return false;
+	m_BlockGrenadeAim = BestAim;
+	m_HasBlockGrenadeAim = true;
+	*pAim = BestAim;
 	return true;
 }
 
@@ -1941,6 +2097,16 @@ void CBot::Tick()
 	if(!m_pPlayer->GetCharacter())
 
 		return;
+	// Keep the prior input between decisions and stagger expensive planning across
+	// adjacent ticks. This halves AI work without delaying reactions by more than
+	// one game tick.
+	const int Now = GameServer()->Server()->Tick();
+	if((Now & 1) != (m_pPlayer->GetCid() & 1) || m_LastThinkTick == Now)
+	{
+		m_pPlayer->to_fire = false;
+		return;
+	}
+	m_LastThinkTick = Now;
 	BotEngine()->TrackBotPosition(m_pPlayer->GetCid(), m_pPlayer->GetCharacter()->GetPos(), GameServer()->Server()->Tick());
 	ApplyPurchasedWeapons();
 	if(m_pPlayer->m_IsBlocker || m_pPlayer->m_PetPopupEmote >= 0)
@@ -1983,7 +2149,6 @@ void CBot::Tick()
 
 
 	const CCharacterCore *pMe = m_pPlayer->GetCharacter()->Core();
-	const int Now = GameServer()->Server()->Tick();
 	if(m_LastProgressTick < 0 || distance_squared(m_LastProgressPos, pMe->m_Pos) > 36.0f * 36.0f)
 	{
 		m_LastProgressPos = pMe->m_Pos;
@@ -2238,6 +2403,8 @@ void CBot::Tick()
 				bot_ai::EWeapon::HAMMER : bot_ai::EWeapon::LASER;
 		}
 		bool ShotTowardFreeze = true;
+		vec2 GrenadeAim(0, 0);
+		bool GrenadeHelps = false;
 		if(m_Fighting && m_HasBlockFreezeGoal && Dist > 1.0f &&
 			distance_squared(pTarget->GetPos(), m_BlockFreezeGoal) > 24.0f * 24.0f)
 		{
@@ -2245,24 +2412,29 @@ void CBot::Tick()
 			const vec2 ToEnemy = normalize(pTarget->GetPos() - MyPos);
 			const bool HammerHelps = CanHammerHit(pTarget) &&
 				dot(normalize(ToEnemy + vec2(0, -1.1f)), ToFreeze) > 0.25f;
-			const bool ShotgunHelps = CanUseWeapon(WEAPON_SHOTGUN) &&
+			const bool ShotgunHelps = Direct && CanUseWeapon(WEAPON_SHOTGUN) &&
 				dot(-ToEnemy, ToFreeze) > 0.3f;
-			ShotTowardFreeze = HammerHelps || ShotgunHelps;
+			GrenadeHelps = FindBlockGrenadeAim(pTarget, m_BlockFreezeGoal, &GrenadeAim);
+			ShotTowardFreeze = HammerHelps || ShotgunHelps || GrenadeHelps;
 			if(HammerHelps)
 				Choice = bot_ai::EWeapon::HAMMER;
 			else if(ShotgunHelps)
 				Choice = bot_ai::EWeapon::SHOTGUN;
+			else if(GrenadeHelps && Now >= m_BlockGrenadeCooldownUntilTick)
+				Choice = bot_ai::EWeapon::GRENADE;
 		}
 		int Weapon = Choice == bot_ai::EWeapon::LASER ? WEAPON_LASER :
 			Choice == bot_ai::EWeapon::SHOTGUN ? WEAPON_SHOTGUN :
+			Choice == bot_ai::EWeapon::GRENADE ? WEAPON_GRENADE :
 			Choice == bot_ai::EWeapon::GUN ? WEAPON_GUN : WEAPON_HAMMER;
 		while(Weapon > WEAPON_HAMMER && !CanUseWeapon(Weapon))
 			--Weapon;
-		vec2 AimVector = pTarget->GetPos() - MyPos;
+		vec2 AimVector = Weapon == WEAPON_GRENADE ? GrenadeAim : pTarget->GetPos() - MyPos;
 		AimVector += pTarget->Core()->m_Vel * bot_ai::AimLeadTicks(Choice, Dist, Aim);
 		bool CanHit = bot_ai::FireAtTarget(m_Fighting, TargetFrozen, ShotTowardFreeze) &&
 			!(m_Rescuing && IsInFreezeFootprint(pTarget->GetPos())) &&
 			(Weapon == WEAPON_HAMMER ? CanHammerHit(pTarget) :
+			Weapon == WEAPON_GRENADE ? GrenadeHelps && Now >= m_BlockGrenadeCooldownUntilTick :
 			Direct && (Weapon == WEAPON_LASER ? Dist < Tuning()->m_LaserReach : Dist < 500.0f));
 		if(!CanHit && Weapon == WEAPON_LASER && Aim >= 8 && Dist < Tuning()->m_LaserReach)
 			CanHit = FindBounceAim(pTarget->GetPos(), &AimVector);
@@ -2272,10 +2444,12 @@ void CBot::Tick()
 			m_pPlayer->GetCharacter()->SetActiveWeapon(Weapon);
 			m_InputData.m_WantedWeapon = Weapon + 1;
 			m_pPlayer->to_fire = true;
+			if(Weapon == WEAPON_GRENADE)
+				m_BlockGrenadeCooldownUntilTick = Now + GameServer()->Server()->TickSpeed() * 3 / 2;
 			// Hammer range is short and directional; never add artificial aim
 			// error to a melee swing, especially when the target is at the edge
 			// of the normal DDNet hit radius.
-			const float Error = Weapon == WEAPON_HAMMER ? 0.0f :
+			const float Error = Weapon == WEAPON_HAMMER || Weapon == WEAPON_GRENADE ? 0.0f :
 				bot_ai::AimErrorRadians(Aim, ((std::rand() % 201) - 100) / 100.0f);
 			AimVector = direction(angle(AimVector) + Error) * std::max(1.0f, length(AimVector));
 			m_Target = AimVector;

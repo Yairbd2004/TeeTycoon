@@ -24,6 +24,7 @@ enum class EWeapon
 	HAMMER,
 	GUN,
 	SHOTGUN,
+	GRENADE,
 	LASER,
 };
 
@@ -110,7 +111,7 @@ inline EWeapon ChooseWeapon(ERole Role, float Distance, int BlockerLevel, int He
 inline float AimLeadTicks(EWeapon Weapon, float Distance, int AimLevel)
 {
 	// DDNet's laser resolves immediately; leading it makes precise shots miss.
-	if(Weapon == EWeapon::LASER || Weapon == EWeapon::HAMMER)
+	if(Weapon == EWeapon::LASER || Weapon == EWeapon::HAMMER || Weapon == EWeapon::GRENADE)
 		return 0.0f;
 	return std::min(9.0f, Distance / 80.0f) * (AimLevel - 1) / 9.0f;
 }

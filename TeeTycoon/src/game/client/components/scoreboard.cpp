@@ -332,7 +332,7 @@ void CScoreboard::RenderSpectators(CUIRect Spectators)
 	int RemainingSpectators = 0;
 	for(const CNetObj_PlayerInfo *pInfo : GameClient()->m_Snap.m_apInfoByName)
 	{
-		if(!pInfo || pInfo->m_Team != TEAM_SPECTATORS)
+		if(!pInfo || pInfo->m_Latency < 0 || pInfo->m_Team != TEAM_SPECTATORS)
 			continue;
 		++RemainingSpectators;
 	}
@@ -347,7 +347,7 @@ void CScoreboard::RenderSpectators(CUIRect Spectators)
 	bool CommaNeeded = false;
 	for(const CNetObj_PlayerInfo *pInfo : GameClient()->m_Snap.m_apInfoByName)
 	{
-		if(!pInfo || pInfo->m_Team != TEAM_SPECTATORS)
+		if(!pInfo || pInfo->m_Latency < 0 || pInfo->m_Team != TEAM_SPECTATORS)
 			continue;
 
 		if(CommaNeeded)
@@ -596,7 +596,7 @@ void CScoreboard::RenderScoreboard(CUIRect Scoreboard, int Team, int CountStart,
 		{
 			// make sure that we render the correct team
 			const CNetObj_PlayerInfo *pInfo = GameClient()->m_Snap.m_apInfoByDDTeamScore[i];
-			if(!pInfo || pInfo->m_Team != Team)
+			if(!pInfo || pInfo->m_Latency < 0 || pInfo->m_Team != Team)
 				continue;
 			bool IsDead = Client()->m_TranslationContext.m_aClients[pInfo->m_ClientId].m_PlayerFlags7 & protocol7::PLAYERFLAG_DEAD;
 			if(!RenderDead && IsDead)
@@ -616,7 +616,7 @@ void CScoreboard::RenderScoreboard(CUIRect Scoreboard, int Team, int CountStart,
 			for(int j = i + 1; j < MAX_CLIENTS; j++)
 			{
 				const CNetObj_PlayerInfo *pInfoNext = GameClient()->m_Snap.m_apInfoByDDTeamScore[j];
-				if(!pInfoNext || pInfoNext->m_Team != Team)
+				if(!pInfoNext || pInfoNext->m_Latency < 0 || pInfoNext->m_Team != Team)
 					continue;
 
 				NextDDTeam = GameClient()->m_Teams.Team(pInfoNext->m_ClientId);
@@ -628,7 +628,7 @@ void CScoreboard::RenderScoreboard(CUIRect Scoreboard, int Team, int CountStart,
 				for(int j = i - 1; j >= 0; j--)
 				{
 					const CNetObj_PlayerInfo *pInfoPrev = GameClient()->m_Snap.m_apInfoByDDTeamScore[j];
-					if(!pInfoPrev || pInfoPrev->m_Team != Team)
+					if(!pInfoPrev || pInfoPrev->m_Latency < 0 || pInfoPrev->m_Team != Team)
 						continue;
 
 					PrevDDTeam = GameClient()->m_Teams.Team(pInfoPrev->m_ClientId);
@@ -1197,7 +1197,7 @@ const char *CScoreboard::GetTeamName(int Team) const
 	const char *pClanName = nullptr;
 	for(const CNetObj_PlayerInfo *pInfo : GameClient()->m_Snap.m_apInfoByScore)
 	{
-		if(!pInfo || pInfo->m_Team != Team)
+		if(!pInfo || pInfo->m_Latency < 0 || pInfo->m_Team != Team)
 			continue;
 
 		if(!pClanName)

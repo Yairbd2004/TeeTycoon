@@ -3189,21 +3189,18 @@ void CGameContext::ConAdminTeleportAll(IConsole::IResult *pResult, void *pUserDa
 		return;
 	}
 	const vec2 Destination = pSelf->GetPlayerChar(TargetId)->m_Pos;
-	int Teleported = 0;
+	pSelf->m_vPendingMassTeleports.clear();
+	pSelf->m_PendingMassTeleportIndex = 0;
 	for(int ClientId = 0; ClientId < MAX_CLIENTS; ClientId++)
 	{
 		CPlayer *pPlayer = pSelf->m_apPlayers[ClientId];
 		CCharacter *pCharacter = pSelf->GetPlayerChar(ClientId);
 		if(!pPlayer || !pCharacter)
 			continue;
-		pSelf->Teleport(pCharacter, Destination, true);
-		pCharacter->ResetJumps();
-		pCharacter->Unfreeze();
-		pCharacter->ResetVelocity();
-		Teleported++;
+		pSelf->m_vPendingMassTeleports.push_back({ClientId, Destination, pCharacter->m_SpawnTick});
 	}
 	char aBuf[160];
-	str_format(aBuf, sizeof(aBuf), "Teleported %d player(s) and bot(s) to client %d (%s).", Teleported, TargetId, pSelf->Server()->ClientName(TargetId));
+	str_format(aBuf, sizeof(aBuf), "Queued %d player(s) and bot(s) for teleport to client %d (%s).", static_cast<int>(pSelf->m_vPendingMassTeleports.size()), TargetId, pSelf->Server()->ClientName(TargetId));
 	pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "tt_admin_teleport_all", aBuf);
 }
 
@@ -3238,7 +3235,8 @@ void CGameContext::ConAdminTeleportAllXY(IConsole::IResult *pResult, void *pUser
 	const float AbsoluteY = Y * 32.0f;
 	const float OffsetX = X * 32.0f;
 	const float OffsetY = Y * 32.0f;
-	int Teleported = 0;
+	pSelf->m_vPendingMassTeleports.clear();
+	pSelf->m_PendingMassTeleportIndex = 0;
 	for(int ClientId = 0; ClientId < MAX_CLIENTS; ClientId++)
 	{
 		CPlayer *pPlayer = pSelf->m_apPlayers[ClientId];
@@ -3251,14 +3249,10 @@ void CGameContext::ConAdminTeleportAllXY(IConsole::IResult *pResult, void *pUser
 		const vec2 Destination(
 			std::clamp(DestX, -OuterKillTileBoundaryDistance + 1.0f, -OuterKillTileBoundaryDistance + MapWidth - 1.0f),
 			std::clamp(DestY, -OuterKillTileBoundaryDistance + 1.0f, -OuterKillTileBoundaryDistance + MapHeight - 1.0f));
-		pSelf->Teleport(pCharacter, Destination, true);
-		pCharacter->ResetJumps();
-		pCharacter->Unfreeze();
-		pCharacter->ResetVelocity();
-		Teleported++;
+		pSelf->m_vPendingMassTeleports.push_back({ClientId, Destination, pCharacter->m_SpawnTick});
 	}
 	char aBuf[192];
-	str_format(aBuf, sizeof(aBuf), "Teleported %d player(s) and bot(s) to %s%.2f, %s%.2f tiles.", Teleported,
+	str_format(aBuf, sizeof(aBuf), "Queued %d player(s) and bot(s) for teleport to %s%.2f, %s%.2f tiles.", static_cast<int>(pSelf->m_vPendingMassTeleports.size()),
 		RelativeX ? "~" : "", X, RelativeY ? "~" : "", Y);
 	pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "tt_admin_teleport_all_xy", aBuf);
 }
@@ -3382,16 +3376,10 @@ void CGameContext::ConBlockerSlot(IConsole::IResult *pResult, void *pUserData)
 		pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "blocker", "Choose a blocker amount from 1 to 32.");
 		return;
 	}
-	int Spawned = 0;
-	for(int i = 0; i < Requested; i++)
-	{
-		const int BotId = pSelf->FindFreeBotId(false);
-		if(BotId < 0 || !pSelf->AddBot(BotId, -1, false, false))
-			break;
-		Spawned++;
-	}
+	pSelf->m_PendingBlockerSpawnCount = Requested;
+	pSelf->m_PendingBlockerSpawnVirtual = false;
 	char aBuf[160];
-	str_format(aBuf, sizeof(aBuf), "Spawned %d/%d slot-backed blocker(s).", Spawned, Requested);
+	str_format(aBuf, sizeof(aBuf), "Queued %d slot-backed blocker(s), spawning one per game tick.", Requested);
 	pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "blocker", aBuf);
 }
 
@@ -3404,16 +3392,10 @@ void CGameContext::ConBlockerVirtual(IConsole::IResult *pResult, void *pUserData
 		pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "blocker", "Choose a blocker amount from 1 to 32.");
 		return;
 	}
-	int Spawned = 0;
-	for(int i = 0; i < Requested; i++)
-	{
-		const int BotId = pSelf->FindFreeBotId(true);
-		if(BotId < 0 || !pSelf->AddBot(BotId, -1, false, true))
-			break;
-		Spawned++;
-	}
+	pSelf->m_PendingBlockerSpawnCount = Requested;
+	pSelf->m_PendingBlockerSpawnVirtual = true;
 	char aBuf[160];
-	str_format(aBuf, sizeof(aBuf), "Spawned %d/%d virtual blocker(s).", Spawned, Requested);
+	str_format(aBuf, sizeof(aBuf), "Queued %d virtual blocker(s), spawning one per game tick.", Requested);
 	pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "blocker", aBuf);
 }
 
@@ -3433,6 +3415,7 @@ void CGameContext::ConBlockerRemove(IConsole::IResult *pResult, void *pUserData)
 void CGameContext::ConBlockerRemoveAll(IConsole::IResult *pResult, void *pUserData)
 {
 	CGameContext *pSelf = static_cast<CGameContext *>(pUserData);
+	pSelf->m_PendingBlockerSpawnCount = 0;
 	int Removed = 0;
 	for(int i = 0; i < MAX_CLIENTS; i++)
 	{
