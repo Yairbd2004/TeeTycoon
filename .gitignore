@@ -9,3 +9,8 @@
 /TeeTycoon/ddnet-server.sqlite
 /TeeTycoon/StartingEvent.txt
 /TeeTycoon/EventType.txt
+
+# Reference maps supplied for local map design, and generated study previews.
+/map_examples/
+/map_design/__pycache__/
+/map_design/previews/*_physics.png

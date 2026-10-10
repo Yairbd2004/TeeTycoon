@@ -74,6 +74,7 @@ void CPlayer::Reset()
 	m_ChatScore = 0;
 	m_Moderating = false;
 	m_EyeEmoteEnabled = true;
+	m_LastEyeEmote = 0;
 	if(Server()->IsSixup(m_ClientId))
 		m_TimerType = TIMERTYPE_SIXUP;
 	else
@@ -237,6 +238,12 @@ void CPlayer::Tick()
 			m_Latency.m_AccumMin = 1000;
 			m_Latency.m_AccumMax = 0;
 		}
+		if(m_IsBlocker && !m_IsVirtualBot)
+		{
+			m_Latency.m_Avg = m_BotDisplayLatency;
+			m_Latency.m_Min = m_BotDisplayLatency;
+			m_Latency.m_Max = m_BotDisplayLatency;
+		}
 	}
 
 	if(Server()->GetNetErrorString(m_ClientId)[0])
@@ -307,6 +314,10 @@ void CPlayer::Tick()
 
 void CPlayer::PostTick()
 {
+	if(m_IsBlocker && !m_IsVirtualBot)
+		for(int i = 0; i < MAX_CLIENTS; i++)
+			if(GameServer()->m_apPlayers[i])
+				GameServer()->m_apPlayers[i]->m_aCurLatency[m_ClientId] = m_BotDisplayLatency;
 	// update latency value
 	if(m_PlayerFlags & PLAYERFLAG_IN_MENU)
 		m_aCurLatency[m_ClientId] = GameServer()->m_apPlayers[m_ClientId]->m_Latency.m_Min;
@@ -348,7 +359,10 @@ void CPlayer::Snap(int SnappingClient)
 	if(!m_ClientInfoValid)
 	{
 		m_ClientInfoValid = true;
-		StrToInts(m_ClientInfo.m_aName, std::size(m_ClientInfo.m_aName), Server()->ClientName(m_ClientId));
+		// Virtual pet IDs are intentionally outside the network server's client
+		// array. Their display name lives on CPlayer and must never be read from
+		// IServer::ClientName, which asserts for those IDs.
+		StrToInts(m_ClientInfo.m_aName, std::size(m_ClientInfo.m_aName), m_IsBot ? username.c_str() : Server()->ClientName(m_ClientId));
 		StrToInts(m_ClientInfo.m_aClan, std::size(m_ClientInfo.m_aClan), Server()->ClientClan(m_ClientId));
 		m_ClientInfo.m_Country = Server()->ClientCountry(m_ClientId);
 		StrToInts(m_ClientInfo.m_aSkin, std::size(m_ClientInfo.m_aSkin), m_TeeInfos.m_aSkinName);
@@ -635,7 +649,9 @@ void CPlayer::OnDisconnect()
 {
 	if (this->hasJoined)
 	{
+		std::lock_guard<std::mutex> Lock(GameServer()->m_EventPlayersMutex);
 		this->GameServer()->playersJoined.erase(std::remove(GameServer()->playersJoined.begin(), GameServer()->playersJoined.end(), this->m_ClientId), GameServer()->playersJoined.end());
+		this->hasJoined = false;
 	}
 	KillCharacter();
 
@@ -889,6 +905,11 @@ void CPlayer::UpdatePlaytime()
 
 void CPlayer::AfkTimer()
 {
+	if(m_IsBot)
+	{
+		SetAfk(false);
+		return;
+	}
 	SetAfk(g_Config.m_SvMaxAfkTime != 0 && m_LastPlaytime < time_get() - time_freq() * g_Config.m_SvMaxAfkTime);
 }
 
@@ -935,7 +956,8 @@ void CPlayer::OverrideDefaultEmote(int Emote, int Tick)
 
 bool CPlayer::CanOverrideDefaultEmote() const
 {
-	return m_LastEyeEmote == 0 || m_LastEyeEmote + (int64_t)g_Config.m_SvEyeEmoteChangeDelay * Server()->TickSpeed() < Server()->Tick();
+	return g_Config.m_SvEyeEmoteChangeDelay <= 0 || m_LastEyeEmote == 0 ||
+		m_LastEyeEmote + (int64_t)g_Config.m_SvEyeEmoteChangeDelay * Server()->TickSpeed() < Server()->Tick();
 }
 
 bool CPlayer::CanSpec() const

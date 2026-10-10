@@ -63,6 +63,7 @@ CBot::CBot(CBotEngine *pBotEngine, CPlayer *pPlayer, int ownerid) : m_Genetics(C
 	isClose = false;
 
 	owner = ownerid;
+	emoteTick = 0;
 
 	stuck = false;
 
@@ -268,19 +269,21 @@ void CBot::UpdateTarget()
 		enemyID >= 0 && enemyID < MAX_CLIENTS && GameServer()->m_apPlayers[enemyID] &&
 		GameServer()->m_apPlayers[enemyID]->GetCharacter() &&
 		GameServer()->m_apPlayers[enemyID]->GetCharacter()->m_SpawnTick == enemyTime;
-	for(int ClientId = 0; ClientId < GameServer()->Server()->MaxClients(); ClientId++)
+	for(int ClientId = 0; ClientId < MAX_CLIENTS; ClientId++)
 	{
 		CPlayer *pTarget = GameServer()->m_apPlayers[ClientId];
-		if(!pTarget || pTarget->m_IsBot || !pTarget->GetCharacter() || ClientId == owner)
+		if(!pTarget || !pTarget->GetCharacter() || ClientId == m_pPlayer->GetCid() || ClientId == owner ||
+			(pTarget->m_IsBot && !m_pPlayer->m_IsBlocker))
 			continue;
 		CCharacter *pChr = pTarget->GetCharacter();
-		if(pChr->Team() != m_pPlayer->GetCharacter()->Team())
+		const bool BlockerDuel = m_pPlayer->m_IsBlocker && pTarget->m_IsBlocker;
+		if(!m_pPlayer->m_IsBlocker && pChr->Team() != m_pPlayer->GetCharacter()->Team())
 			continue;
 		const float Dist = distance_squared(MyPos, pChr->GetPos());
 		if(Dist > Radius * Radius || (pOwner && distance_squared(OwnerPos, pChr->GetPos()) > Radius * Radius))
 			continue;
 		const bool ThreatForPet = owner >= 0 && ThreatActive && ClientId == enemyID;
-		if(IsHelpTarget(pTarget, ClientId) && !ThreatForPet)
+		if(IsHelpTarget(pTarget, ClientId) && !ThreatForPet && !BlockerDuel)
 		{
 			if(GameServer()->IsBotFrozen(pChr) && RescueId != owner && Dist < RescueDist)
 			{
@@ -293,7 +296,7 @@ void CBot::UpdateTarget()
 				FollowDist = Dist;
 			}
 		}
-		else if((IsBlockTarget(pTarget, ClientId) || (ThreatActive && ClientId == enemyID)) &&
+		else if((IsBlockTarget(pTarget, ClientId) || (ThreatActive && ClientId == enemyID) || BlockerDuel) &&
 			!GameServer()->IsPlayerFreezeLocked(ClientId) &&
 			(Dist < BlockDist || (ThreatActive && ClientId == enemyID)))
 		{
@@ -480,12 +483,15 @@ void CBot::UpdateTarget()
 	if(m_Fighting && Skill(PET_SKILL_BLOCKER) >= 4 && !m_HasTeleTarget)
 	{
 		const int Now = GameServer()->Server()->Tick();
+		const bool TargetOnFreeze = IsInFreezeFootprint(TargetPos);
 		if(m_LastBlockPlanTick < 0 || Now - m_LastBlockPlanTick >=
 			std::max(15, 60 - Skill(PET_SKILL_BLOCKER) * 4) ||
-			distance_squared(m_LastBlockTargetPos, TargetPos) > 48.0f * 48.0f)
+			distance_squared(m_LastBlockTargetPos, TargetPos) > 32.0f * 32.0f ||
+			m_LastBlockTargetOnFreeze != TargetOnFreeze)
 		{
 			m_LastBlockPlanTick = Now;
 			m_LastBlockTargetPos = TargetPos;
+			m_LastBlockTargetOnFreeze = TargetOnFreeze;
 			bool Supported = false;
 			const int FreezeTicks = GameServer()->m_apPlayers[TargetId]->GetCharacter()->m_FreezeTime > 0 ?
 				GameServer()->m_apPlayers[TargetId]->GetCharacter()->m_FreezeTime :
@@ -499,7 +505,7 @@ void CBot::UpdateTarget()
 			const vec2 ToFreeze = m_BlockFreezeGoal - TargetPos;
 			const vec2 ToBot = MyPos - TargetPos;
 			const bool DirectHook = !Collision()->FastIntersectLine(MyPos, TargetPos, nullptr, nullptr) &&
-				length(ToBot) < static_cast<float>(Tuning()->m_HookLength) * 0.85f;
+				length(ToBot) < static_cast<float>(Tuning()->m_HookLength) * 0.94f;
 			const float LaunchDistance = std::min(static_cast<float>(Tuning()->m_HookLength) * 0.68f,
 				std::max(135.0f, length(ToFreeze) * 0.8f));
 			const bool Aligned = length(ToBot) >= LaunchDistance &&
@@ -507,8 +513,9 @@ void CBot::UpdateTarget()
 					m_BlockFreezeGoal.x, m_BlockFreezeGoal.y, 0.72f);
 			if(!DirectHook || !Aligned)
 			{
-				if(m_LastBlockStancePlanTick < 0 || Now - m_LastBlockStancePlanTick >= 20 ||
-					(m_HasBlockStance && distance(MyPos, m_BlockWaypoint) < 36.0f))
+				if(m_LastBlockStancePlanTick < 0 ||
+					(m_HasBlockStance && distance(MyPos, m_BlockWaypoint) < 36.0f) ||
+					(!m_HasBlockStance && Now - m_LastBlockStancePlanTick >= 20))
 				{
 					m_LastBlockStancePlanTick = Now;
 					m_HasBlockStance = FindBlockStance(MyPos, TargetPos, m_BlockFreezeGoal,
@@ -689,28 +696,25 @@ void CBot::checkStuck(bool inSight)
 void CBot::emote()
 
 {
+	const int Tick = GameServer()->Server()->Tick();
 
 	if(emoteTick == 0)
 
 	{
 
-		emoteTick = GameServer()->Server()->Tick();
+		emoteTick = Tick;
 
 	}
 
-	else if(emoteTick + 100 <= GameServer()->Server()->Tick())
+	else if(emoteTick + 2 * GameServer()->Server()->TickSpeed() <= Tick)
 
 	{
 
-		CNetMsg_Sv_Emoticon Msg;
+		if(m_pPlayer->m_IsBlocker || m_pPlayer->m_PetPopupEmote >= 0)
+			GameServer()->SendEmoticon(m_pPlayer->GetCid(),
+				m_pPlayer->m_IsBlocker ? EMOTICON_DEVILTEE : m_pPlayer->m_PetPopupEmote, -1);
 
-		Msg.m_ClientId = m_pPlayer->GetCid();
-
-		Msg.m_Emoticon = 2;
-
-		GameServer()->Server()->SendPackMsg(&Msg, MSGFLAG_VITAL, -1);
-
-		emoteTick = GameServer()->Server()->Tick();
+		emoteTick = Tick;
 
 	}
 
@@ -725,7 +729,67 @@ int CBot::Skill(EPetSkill SkillId) const
 
 bool CBot::CanUseWeapon(int Weapon) const
 {
-	return Weapon == WEAPON_HAMMER || owner < 0 || (Weapon >= WEAPON_GUN && Weapon <= m_pPlayer->weaponBot);
+	return Weapon == WEAPON_HAMMER || owner < 0 ||
+		(Weapon >= WEAPON_GUN && Weapon < NUM_WEAPONS && (m_pPlayer->m_PetWeaponMask & (1 << Weapon)) != 0);
+}
+
+void CBot::ApplyPurchasedWeapons()
+{
+	if(owner < 0 || !m_pPlayer->GetCharacter())
+		return;
+	for(int Weapon = WEAPON_GUN; Weapon < WEAPON_NINJA; Weapon++)
+		if(CanUseWeapon(Weapon))
+			m_pPlayer->GetCharacter()->GiveWeapon(Weapon);
+	if(CanUseWeapon(WEAPON_NINJA) && m_pPlayer->GetCharacter()->GetActiveWeapon() != WEAPON_NINJA)
+		m_pPlayer->GetCharacter()->GiveNinjaWeapon();
+}
+
+void CBot::UpdatePetNinja()
+{
+	if(owner < 0 || !m_pPlayer->GetCharacter() || !CanUseWeapon(WEAPON_NINJA))
+		return;
+	const int Now = GameServer()->Server()->Tick();
+	const int TickSpeed = GameServer()->Server()->TickSpeed();
+	CCharacter *pCharacter = m_pPlayer->GetCharacter();
+	const bool NinjaActive = pCharacter->GetActiveWeapon() == WEAPON_NINJA;
+	CPlayer *pOwner = owner < MAX_CLIENTS ? GameServer()->m_apPlayers[owner] : nullptr;
+	const bool OwnerFar = pOwner && pOwner->GetCharacter() &&
+		distance(pCharacter->GetPos(), pOwner->GetCharacter()->GetPos()) >= 1000.0f;
+	const bool UsefulRoute = length(m_Target) >= 120.0f && !m_Rescuing && !m_Fighting && !stay &&
+		!GameServer()->IsBotFrozen(pCharacter) && SafeTravelSegment(pCharacter->GetPos(),
+			pCharacter->GetPos() + normalize(m_Target) * 180.0f);
+
+	if(m_NinjaActiveUntilTick > 0 && (Now >= m_NinjaActiveUntilTick || !OwnerFar || !UsefulRoute))
+	{
+		if(NinjaActive)
+			pCharacter->GiveWeapon(WEAPON_NINJA, true);
+		pCharacter->GiveNinjaWeapon();
+		m_NinjaActiveUntilTick = 0;
+		m_NinjaCooldownUntilTick = std::max(m_NinjaCooldownUntilTick, Now + 45 * TickSpeed);
+		m_pPlayer->to_fire = false;
+		return;
+	}
+
+	if(m_NinjaActiveUntilTick == 0 && Now >= m_NinjaCooldownUntilTick && OwnerFar && UsefulRoute)
+	{
+		pCharacter->GiveWeapon(WEAPON_NINJA);
+		m_NinjaActiveUntilTick = Now + 10 * TickSpeed;
+		m_NinjaCooldownUntilTick = Now + 70 * TickSpeed;
+		m_NinjaNextDashTick = Now;
+	}
+	if(m_NinjaActiveUntilTick > Now)
+	{
+		m_InputData.m_WantedWeapon = WEAPON_NINJA + 1;
+		m_InputData.m_TargetX = static_cast<int>(m_Target.x);
+		m_InputData.m_TargetY = static_cast<int>(m_Target.y);
+		if(Now >= m_NinjaNextDashTick && length(m_Target) > 1.0f)
+		{
+			m_pPlayer->to_fire = true;
+			m_NinjaNextDashTick = Now + std::max(1, TickSpeed / 2);
+		}
+		else
+			m_pPlayer->to_fire = false;
+	}
 }
 
 bool CBot::CanHammerHit(CCharacter *pTarget)
@@ -736,6 +800,80 @@ bool CBot::CanHammerHit(CCharacter *pTarget)
 		return false;
 	const vec2 Delta = pTarget->GetPos() - pMe->GetPos();
 	return bot_ai::HammerHits(Delta.x, Delta.y, pMe->GetProximityRadius(), pTarget->GetProximityRadius());
+}
+
+bool CBot::TryMobilityWeapon()
+{
+	CCharacter *pCharacter = m_pPlayer->GetCharacter();
+	if(!pCharacter || owner < 0 || !g_Config.m_SvBotAllowFire || stay || m_Rescuing || m_Fighting ||
+		GameServer()->IsBotFrozen(pCharacter) || length(m_Target) < 160.0f)
+		return false;
+	const vec2 Pos = pCharacter->GetPos();
+	const vec2 GoalDir = normalize(m_Target);
+	const auto SafeBoostDirection = [&](float Distance) {
+		const int Steps = std::max(1, static_cast<int>(Distance / 16.0f));
+		for(int i = 1; i <= Steps; i++)
+		{
+			const vec2 Sample = Pos + GoalDir * (Distance * static_cast<float>(i) / Steps);
+			if(IsDangerous(Sample) || IsDangerous(Sample + vec2(0, 14)) ||
+				IsDangerous(Sample - vec2(0, 14)) || IsDangerous(Sample + vec2(14, 0)) ||
+				IsDangerous(Sample - vec2(14, 0)))
+				return false;
+		}
+		return true;
+	};
+	if(!SafeBoostDirection(160.0f))
+		return false;
+	const int Now = GameServer()->Server()->Tick();
+	const int TickSpeed = GameServer()->Server()->TickSpeed();
+	const bool NeedClimb = GoalDir.y < -0.45f && !HasReachableClimbHook(Pos);
+
+	// A DDNet shotgun laser can hit its owner after reflecting from terrain.
+	// Its force points back toward the bounce wall, so use only a reflection
+	// whose first wall lies along the safe travel direction.
+	if(CanUseWeapon(WEAPON_SHOTGUN) && Now >= m_MobilityShotgunTick)
+	{
+		vec2 Aim;
+		if(FindBounceAim(Pos, &Aim) &&
+			Collision()->IntersectLine(Pos, Pos + normalize(Aim) * Tuning()->m_LaserReach, nullptr, nullptr))
+		{
+			vec2 WallPos;
+			Collision()->IntersectLine(Pos, Pos + normalize(Aim) * Tuning()->m_LaserReach, &WallPos, nullptr);
+			const vec2 TowardWall = normalize(WallPos - Pos);
+			if(dot(TowardWall, GoalDir) > 0.55f)
+			{
+				pCharacter->GiveWeapon(WEAPON_SHOTGUN);
+				pCharacter->SetActiveWeapon(WEAPON_SHOTGUN);
+				m_InputData.m_WantedWeapon = WEAPON_SHOTGUN + 1;
+				m_Target = Aim;
+				m_pPlayer->to_fire = true;
+				m_MobilityShotgunTick = Now + 2 * TickSpeed;
+				return true;
+			}
+		}
+	}
+
+	// A downward grenade that detonates against nearby ground gives an upward
+	// impulse. Restrict it to a clear upward route, safe footing, and a long
+	// cooldown so it cannot become a repeated self-damage loop.
+	const bool Grounded = Collision()->IsOnGround(Pos, pCharacter->GetProximityRadius());
+	const bool SafeBlastArea = !IsDangerous(Pos) && !IsDangerous(Pos + vec2(0, -32)) &&
+		!IsDangerous(Pos + vec2(0, 32)) && !IsDangerous(Pos + vec2(-32, 0)) &&
+		!IsDangerous(Pos + vec2(32, 0));
+	if(NeedClimb && GoalDir.y < -0.65f && Grounded && SafeBlastArea &&
+		SafeTravelSegment(Pos, Pos + GoalDir * 128.0f) && CanUseWeapon(WEAPON_GRENADE) &&
+		Now >= m_MobilityGrenadeTick)
+	{
+		pCharacter->GiveWeapon(WEAPON_GRENADE);
+		pCharacter->SetActiveWeapon(WEAPON_GRENADE);
+		m_InputData.m_WantedWeapon = WEAPON_GRENADE + 1;
+		m_Target = vec2(0.0f, 100.0f);
+		m_InputData.m_Jump = 1;
+		m_pPlayer->to_fire = true;
+		m_MobilityGrenadeTick = Now + 6 * TickSpeed;
+		return true;
+	}
+	return false;
 }
 
 bool CBot::IsDangerous(vec2 Pos)
@@ -813,7 +951,8 @@ bool CBot::FindSafeFreezeCrossing(vec2 Goal, int *pDirection, int *pJump, int *p
 				for(int Tick = 0; Tick < 80; Tick++)
 				{
 					Predicted.m_Input.m_Direction = TouchedFreeze ? 0 : Direction;
-					Predicted.m_Input.m_Jump = TouchedFreeze ? 0 : Jump;
+					Predicted.m_Input.m_Jump = bot_ai::JumpPressAllowed(!TouchedFreeze && Jump,
+						Predicted.m_Jumped, Predicted.m_JumpedTotal, Predicted.m_Vel.y);
 					Predicted.m_Input.m_Hook = TouchedFreeze ? 0 : Hook;
 					Predicted.Tick(true);
 					Predicted.Move();
@@ -864,34 +1003,78 @@ bool CBot::FindBlockFreezeGoal(vec2 TargetPos, int RemainingFreezeTicks, vec2 *p
 	const int CenterX = std::clamp(static_cast<int>(TargetPos.x / 32), 0, Width - 1);
 	const int CenterY = std::clamp(static_cast<int>(TargetPos.y / 32), 0, Height - 1);
 	const int Reach = Skill(PET_SKILL_BLOCKER) >= 8 ? 13 : 7;
-	float BestScore = 1e30f;
-	bool Found = false;
-	for(int Y = std::max(0, CenterY - Reach); Y <= std::min(Height - 1, CenterY + Reach); Y++)
+	const int TicksPerSecond = GameServer()->Server()->TickSpeed();
+	const bool Urgent = RemainingFreezeTicks > 0 && RemainingFreezeTicks <= 2 * TicksPerSecond;
+	struct SGoal
 	{
-		for(int X = std::max(0, CenterX - Reach); X <= std::min(Width - 1, CenterX + Reach); X++)
+		float m_Score = 1e30f;
+		float m_TravelTicks = 1e30f;
+		vec2 m_Pos = vec2(0, 0);
+		bool m_Supported = false;
+		bool m_Found = false;
+	};
+	SGoal aBest[2];
+	const vec2 MyPos = m_pPlayer->GetCharacter()->GetPos();
+	const float HookLength = static_cast<float>(Tuning()->m_HookLength);
+	for(int Pass = 0; Pass < 2; Pass++)
+	{
+		for(int Y = std::max(0, CenterY - Reach); Y <= std::min(Height - 1, CenterY + Reach); Y++)
 		{
-			const vec2 Pos(X * 32.0f + 16.0f, Y * 32.0f + 16.0f);
-			if(!IsFreezeAt(Pos) || Collision()->CheckPoint(Pos) ||
-				Collision()->FastIntersectLine(TargetPos, Pos, nullptr, nullptr))
-				continue;
-			const bool Supported = Collision()->CheckPoint(Pos + vec2(0, 32));
-			const float Dist = distance(TargetPos, Pos);
-			// A supported freeze keeps the target frozen. Prefer it when it can
-			// be reached before the current freeze wears off; otherwise throw
-			// the target at a nearby freeze first.
-			const float TimeBudget = static_cast<float>(std::max(1, RemainingFreezeTicks));
-			const float TravelTicks = Dist / std::max(1.0f, static_cast<float>(Tuning()->m_HookDragSpeed)) + 12.0f;
-			const float Score = bot_ai::FreezeGoalScore(Dist, Supported, TravelTicks, TimeBudget);
-			if(Score < BestScore)
+			for(int X = std::max(0, CenterX - Reach); X <= std::min(Width - 1, CenterX + Reach); X++)
 			{
-				BestScore = Score;
-				*pGoal = Pos;
-				*pSupported = Supported;
-				Found = true;
+				const vec2 Pos(X * 32.0f + 16.0f, Y * 32.0f + 16.0f);
+				if(!IsFreezeAt(Pos) || Collision()->CheckPoint(Pos) ||
+					Collision()->FastIntersectLine(TargetPos, Pos, nullptr, nullptr))
+					continue;
+				const vec2 Offset = Pos - TargetPos;
+				const bool Above = Offset.y < -32.0f && std::abs(Offset.x) < std::abs(Offset.y);
+				// Prefer side and lower freeze first. An elevated freeze is the
+				// fallback when no reachable side/bottom tile exists nearby.
+				if((Pass == 0 && Above) || (Pass == 1 && !Above))
+					continue;
+				const bool Supported = Collision()->CheckPoint(Pos + vec2(0, 32));
+				const float Dist = distance(TargetPos, Pos);
+				const float TimeBudget = static_cast<float>(std::max(1, RemainingFreezeTicks));
+				const float StanceDistance = std::clamp(Dist * 0.9f, HookLength * 0.68f, HookLength * 0.78f);
+				const vec2 IdealStance = TargetPos + normalize(Offset) * StanceDistance;
+				const float ApproachTicks = distance(MyPos, IdealStance) / 7.0f;
+				const float HookTicks = distance(IdealStance, TargetPos) /
+					std::max(1.0f, static_cast<float>(Tuning()->m_HookFireSpeed));
+				const float PullTicks = Dist / std::max(1.0f, static_cast<float>(Tuning()->m_HookDragSpeed)) + 14.0f;
+				const float TravelTicks = ApproachTicks + HookTicks + PullTicks;
+				const float Score = Urgent ? TravelTicks * 12.0f + Dist * 0.1f -
+					(Supported && TravelTicks <= TimeBudget ? 80.0f : 0.0f) :
+					bot_ai::FreezeGoalScore(Dist, Supported, TravelTicks, TimeBudget);
+				if(Score < aBest[Pass].m_Score)
+				{
+					aBest[Pass].m_Score = Score;
+					aBest[Pass].m_TravelTicks = TravelTicks;
+					aBest[Pass].m_Pos = Pos;
+					aBest[Pass].m_Supported = Supported;
+					aBest[Pass].m_Found = true;
+				}
 			}
 		}
 	}
-	return Found;
+	// Side and lower freezes remain preferred. With under two seconds left,
+	// choose an overhead tile only if it is the sole route likely to beat the
+	// timer; if no candidate can, choose the fastest route available.
+	const SGoal *pBest = nullptr;
+	if(aBest[0].m_Found && (!Urgent || aBest[0].m_TravelTicks <= RemainingFreezeTicks))
+		pBest = &aBest[0];
+	else if(aBest[1].m_Found && (!Urgent || aBest[1].m_TravelTicks <= RemainingFreezeTicks))
+		pBest = &aBest[1];
+	else if(Urgent && aBest[0].m_Found && aBest[1].m_Found)
+		pBest = aBest[0].m_TravelTicks <= aBest[1].m_TravelTicks ? &aBest[0] : &aBest[1];
+	else if(aBest[0].m_Found)
+		pBest = &aBest[0];
+	else if(aBest[1].m_Found)
+		pBest = &aBest[1];
+	if(!pBest)
+		return false;
+	*pGoal = pBest->m_Pos;
+	*pSupported = pBest->m_Supported;
+	return true;
 }
 
 bool CBot::FindBlockStance(vec2 MyPos, vec2 TargetPos, vec2 FreezeGoal, vec2 *pStance, vec2 *pWaypoint)
@@ -902,16 +1085,18 @@ bool CBot::FindBlockStance(vec2 MyPos, vec2 TargetPos, vec2 FreezeGoal, vec2 *pS
 	const vec2 Across(-TowardFreeze.y, TowardFreeze.x);
 	float BestScore = 1e30f;
 	bool Found = false;
-	const float DesiredPull = std::min(static_cast<float>(Tuning()->m_HookLength) * 0.73f,
-		std::max(160.0f, distance(TargetPos, FreezeGoal) * 0.9f));
-	for(float PullDistance : {160.0f, 205.0f, 250.0f, 295.0f, 340.0f})
+	const float HookLength = static_cast<float>(Tuning()->m_HookLength);
+	const float DesiredPull = std::min(HookLength * 0.78f,
+		std::max(HookLength * 0.68f, distance(TargetPos, FreezeGoal) * 0.95f));
+	for(float PullDistance : {230.0f, 290.0f, 350.0f, 410.0f, 470.0f, 530.0f})
 	{
-		if(PullDistance < DesiredPull * 0.88f ||
-			PullDistance > static_cast<float>(Tuning()->m_HookLength) * 0.82f)
+		if(PullDistance < DesiredPull * 0.9f || PullDistance > HookLength * 0.84f)
 			continue;
-		for(float Side : {0.0f, -32.0f, 32.0f, -64.0f, 64.0f})
+		for(float Side : {-72.0f, 72.0f, -40.0f, 40.0f, 0.0f})
 		{
-			const vec2 Pos = TargetPos + TowardFreeze * PullDistance + Across * Side;
+			for(float Height : {-64.0f, -24.0f, 0.0f, 24.0f})
+			{
+			const vec2 Pos = TargetPos + TowardFreeze * PullDistance + Across * Side + vec2(0, Height);
 			if(Collision()->CheckPoint(Pos) || Collision()->CheckPoint(Pos + vec2(0, 14)) ||
 				Collision()->CheckPoint(Pos - vec2(0, 14)) || IsDangerous(Pos) ||
 				IsDangerous(Pos + vec2(0, 14)) || IsDangerous(Pos + vec2(14, 0)) ||
@@ -921,14 +1106,15 @@ bool CBot::FindBlockStance(vec2 MyPos, vec2 TargetPos, vec2 FreezeGoal, vec2 *pS
 			vec2 Waypoint;
 			if(!FindLocalRoute(MyPos, Pos, &Waypoint))
 				continue;
-			const float Score = distance(MyPos, Pos) * 0.65f + std::abs(Side) * 0.6f +
-				std::abs(PullDistance - DesiredPull) * 1.2f;
+			const float Score = distance(MyPos, Pos) * 0.65f + std::abs(Side) * 0.15f +
+				std::abs(PullDistance - DesiredPull) * 0.75f + std::abs(Height + 48.0f) * 0.25f;
 			if(Score < BestScore)
 			{
 				BestScore = Score;
 				*pStance = Pos;
 				*pWaypoint = Waypoint;
 				Found = true;
+			}
 			}
 		}
 	}
@@ -1045,6 +1231,8 @@ void CBot::OnSkillUpgrade()
 	m_LastWallHookPlanTick = -1;
 	m_LastFreezeCrossPlanTick = -1;
 	m_FreezeCrossUntilTick = -1;
+	m_LastBlockJumpCheckTick = -1;
+	m_BlockJumpArcSafe = false;
 }
 
 bool CBot::HasReachableClimbHook(vec2 Position)
@@ -1123,13 +1311,15 @@ bool CBot::FindLocalRoute(vec2 Start, vec2 Goal, vec2 *pWaypoint)
 	const int StartY = std::clamp(static_cast<int>(Start.y / 32), 0, MapHeight - 1);
 	const int GoalX = std::clamp(static_cast<int>(Goal.x / 32), 0, MapWidth - 1);
 	const int GoalY = std::clamp(static_cast<int>(Goal.y / 32), 0, MapHeight - 1);
-	const int MinX = std::max(0, std::min(StartX, GoalX) - 20);
-	const int MinY = std::max(0, std::min(StartY, GoalY) - 20);
-	const int MaxX = std::min(MapWidth - 1, std::max(StartX, GoalX) + 20);
-	const int MaxY = std::min(MapHeight - 1, std::max(StartY, GoalY) + 20);
+	// Let A* route around long walls and platform gaps instead of failing when
+	// the useful detour is more than twenty tiles away from the direct corridor.
+	const int MinX = std::max(0, std::min(StartX, GoalX) - 48);
+	const int MinY = std::max(0, std::min(StartY, GoalY) - 48);
+	const int MaxX = std::min(MapWidth - 1, std::max(StartX, GoalX) + 48);
+	const int MaxY = std::min(MapHeight - 1, std::max(StartY, GoalY) + 48);
 	const int Width = MaxX - MinX + 1;
 	const int Height = MaxY - MinY + 1;
-	if(Width * Height > 16000)
+	if(Width * Height > 24000)
 		return false;
 	const int StartIndex = (StartY - MinY) * Width + StartX - MinX;
 	const int GoalIndex = (GoalY - MinY) * Width + GoalX - MinX;
@@ -1179,7 +1369,7 @@ bool CBot::FindLocalRoute(vec2 Start, vec2 Goal, vec2 *pWaypoint)
 	static constexpr int s_aDx[8] = {-1, 0, 1, -1, 1, -1, 0, 1};
 	static constexpr int s_aDy[8] = {-1, -1, -1, 0, 0, 1, 1, 1};
 	int Expanded = 0;
-	const int Limit = 1200 + Skill(PET_SKILL_RACE) * 320;
+	const int Limit = 1800 + Skill(PET_SKILL_RACE) * 720;
 	while(!Queue.empty() && Expanded++ < Limit)
 	{
 		const int Current = Queue.top().second;
@@ -1385,11 +1575,13 @@ void CBot::ApplyMovementSkills()
 			Predicted.Init(&World, Collision());
 			Predicted.m_Input = m_InputData;
 			Predicted.m_Input.m_Direction = Direction;
-			Predicted.m_Input.m_Jump = Jump;
 			Predicted.m_Input.m_Hook = m_InputData.m_Hook;
 			float Risk = 0.0f;
 			for(int Step = 0; Step < Horizon; Step++)
 			{
+				// Simulate the jump release between ground and air presses.
+				Predicted.m_Input.m_Jump = bot_ai::JumpPressAllowed(Jump,
+					Predicted.m_Jumped, Predicted.m_JumpedTotal, Predicted.m_Vel.y);
 				Predicted.Tick(true);
 				Predicted.Move();
 				Predicted.Quantize();
@@ -1417,6 +1609,19 @@ bool CBot::DefendAgainstUpwardThrow()
 		!m_pPlayer->GetCharacter())
 		return false;
 	const CCharacterCore *pCore = m_pPlayer->GetCharacter()->Core();
+	const int Now = GameServer()->Server()->Tick();
+	if(m_DefenseHookUntilTick > Now && g_Config.m_SvBotAllowHook && !IsDangerous(pCore->m_Pos))
+	{
+		// Keep the ground anchor long enough for the hook to arrive and take hold.
+		// Re-aiming it every tick turns it into the short, ineffective hook flick.
+		m_InputData.m_Hook = 1;
+		m_InputData.m_TargetX = static_cast<int>(m_DefenseHookAim.x);
+		m_InputData.m_TargetY = static_cast<int>(m_DefenseHookAim.y);
+		m_pPlayer->to_fire = false;
+		return true;
+	}
+	if(m_DefenseHookUntilTick <= Now)
+		m_DefenseHookUntilTick = -1;
 	if(pCore->m_Vel.y > -2.5f || IsDangerous(pCore->m_Pos))
 		return false;
 	bool FreezeAbove = false;
@@ -1447,13 +1652,16 @@ bool CBot::DefendAgainstUpwardThrow()
 		Predicted.Init(&World, Collision());
 		Predicted.m_Tuning = pCore->m_Tuning;
 		Predicted.m_Input.m_Direction = Direction;
-		Predicted.m_Input.m_Jump = Jump;
 		Predicted.m_Input.m_Hook = Hook ? 1 : 0;
 		Predicted.m_Input.m_TargetX = Aim.x;
 		Predicted.m_Input.m_TargetY = Aim.y;
 		float Score = 0.0f;
-		for(int Tick = 0; Tick < 22; Tick++)
+		for(int Tick = 0; Tick < std::max(22, GameServer()->Server()->TickSpeed() / 2); Tick++)
 		{
+			// Match the live input edge: release after a press so the air jump
+			// remains available after the ground jump.
+			Predicted.m_Input.m_Jump = bot_ai::JumpPressAllowed(Jump,
+				Predicted.m_Jumped, Predicted.m_JumpedTotal, Predicted.m_Vel.y);
 			Predicted.Tick(true);
 			Predicted.Move();
 			Predicted.Quantize();
@@ -1472,8 +1680,6 @@ bool CBot::DefendAgainstUpwardThrow()
 	{
 		for(int Jump = 0; Jump <= 1; Jump++)
 		{
-			if(Jump && (pCore->m_Jumped & 1))
-				continue;
 			const float Score = Predict(Direction, Jump, false, vec2(0, 1));
 			if(Score + 1.0f < Best.m_Score)
 				Best = {Score, Direction, Jump, false, vec2(0, 1)};
@@ -1481,20 +1687,28 @@ bool CBot::DefendAgainstUpwardThrow()
 	}
 	if(g_Config.m_SvBotAllowHook && pCore->m_HookState == HOOK_IDLE && !m_LastData.m_Hook)
 	{
-		for(int i = 0; i < 16; i++)
+		// Use a long, downward ray to catch safe ground below the tee. Horizontal
+		// wall flicks and short hooks cannot counter an upward throw in time.
+		for(int i = 2; i <= 6; i++)
 		{
 			const vec2 Aim = direction(2.0f * pi * i / 16.0f) * static_cast<float>(Tuning()->m_HookLength);
-			if(Aim.y < -0.4f * Tuning()->m_HookLength)
-				continue; // hooking the ceiling accelerates an upward throw
 			vec2 Hit;
 			const int Tile = Collision()->FastIntersectLine(pCore->m_Pos, pCore->m_Pos + Aim, &Hit, nullptr);
-			if(!Tile || Tile == TILE_NOHOOK || distance(pCore->m_Pos, Hit) < 50.0f)
+			if(!Tile || Tile == TILE_NOHOOK)
+				continue;
+			const vec2 HitDelta = Hit - pCore->m_Pos;
+			if(HitDelta.y < 80.0f ||
+				std::abs(HitDelta.x) > HitDelta.y * 0.8f || length(HitDelta) < 120.0f ||
+				IsDangerous(Hit - normalize(HitDelta) * 24.0f))
 				continue;
 			for(int Direction = -1; Direction <= 1; Direction++)
 			{
-				const float Score = Predict(Direction, 0, true, Hit - pCore->m_Pos);
-				if(Score + 4.0f < Best.m_Score)
-					Best = {Score, Direction, 0, true, Hit - pCore->m_Pos};
+				for(int Jump = 0; Jump <= 1; Jump++)
+				{
+					const float Score = Predict(Direction, Jump, true, Hit - pCore->m_Pos);
+					if(Score + 4.0f < Best.m_Score)
+						Best = {Score, Direction, Jump, true, Hit - pCore->m_Pos};
+				}
 			}
 		}
 	}
@@ -1511,6 +1725,8 @@ bool CBot::DefendAgainstUpwardThrow()
 		m_InputData.m_TargetX = Best.m_Aim.x;
 		m_InputData.m_TargetY = Best.m_Aim.y;
 		m_pPlayer->to_fire = false;
+		m_DefenseHookAim = Best.m_Aim;
+		m_DefenseHookUntilTick = Now + std::max(1, GameServer()->Server()->TickSpeed() * 2 / 5);
 	}
 	return true;
 }
@@ -1557,6 +1773,9 @@ void CBot::Tick()
 	if(!m_pPlayer->GetCharacter())
 
 		return;
+	ApplyPurchasedWeapons();
+	if(m_pPlayer->m_IsBlocker || m_pPlayer->m_PetPopupEmote >= 0)
+		emote();
 	if(GameServer()->IsBotFrozen(m_pPlayer->GetCharacter()))
 	{
 		if(m_FrozenSinceTick < 0)
@@ -1809,8 +2028,9 @@ void CBot::Tick()
 		m_InputData.m_Hook = 0;
 
 	ApplyMovementSkills();
-	if((pMe->m_Jumped & 1) && m_InputData.m_Jump)
-		m_InputData.m_Jump = 0; // release before a later air or ground jump
+	if(m_InputData.m_Jump && !bot_ai::JumpPressAllowed(true,
+		pMe->m_Jumped, pMe->m_JumpedTotal, pMe->m_Vel.y))
+		m_InputData.m_Jump = 0; // release and wait for the apex before using the air jump
 	if(RescueHold)
 	{
 		m_InputData.m_Direction = 0;
@@ -1883,7 +2103,11 @@ void CBot::Tick()
 			m_pPlayer->GetCharacter()->SetActiveWeapon(Weapon);
 			m_InputData.m_WantedWeapon = Weapon + 1;
 			m_pPlayer->to_fire = true;
-			const float Error = bot_ai::AimErrorRadians(Aim, ((std::rand() % 201) - 100) / 100.0f);
+			// Hammer range is short and directional; never add artificial aim
+			// error to a melee swing, especially when the target is at the edge
+			// of the normal DDNet hit radius.
+			const float Error = Weapon == WEAPON_HAMMER ? 0.0f :
+				bot_ai::AimErrorRadians(Aim, ((std::rand() % 201) - 100) / 100.0f);
 			AimVector = direction(angle(AimVector) + Error) * std::max(1.0f, length(AimVector));
 			m_Target = AimVector;
 		}
@@ -1921,11 +2145,79 @@ void CBot::Tick()
 		if(m_Fighting && g_Config.m_SvBotAllowHook)
 		{
 			const bool HookedTarget = pMe->m_HookState == HOOK_GRABBED && pMe->HookedPlayer() == TargetId;
+			const bool HoldTargetHook = m_HasBlockFreezeGoal &&
+				ShouldHoldEnemyHook(pTarget, m_BlockFreezeGoal);
 			if(HookedTarget)
-				m_InputData.m_Hook = m_HasBlockFreezeGoal &&
-					ShouldHoldEnemyHook(pTarget, m_BlockFreezeGoal);
-			else if(m_HasBlockFreezeGoal && pMe->m_HookState == HOOK_IDLE && !m_LastData.m_Hook && Direct &&
-				Dist < static_cast<float>(Tuning()->m_HookLength) * 0.85f &&
+			{
+				m_InputData.m_Hook = HoldTargetHook;
+				CombatHookAim = true;
+				m_Target = pTarget->GetPos() - MyPos;
+				if(m_InputData.m_Hook)
+				{
+					// Keep the hook pulling while sidestepping out of the tee's path.
+					// Jumping in place or walking into the target can cancel the
+					// intended throw with a body collision.
+					const vec2 Pull = normalize(m_BlockFreezeGoal - pTarget->GetPos());
+					const vec2 Across(-Pull.y, Pull.x);
+					int BestDirection = 0;
+					float BestLateralDistance = std::abs(dot(MyPos - pTarget->GetPos(), Across));
+					for(int Direction : {-1, 1})
+					{
+						const vec2 Step = MyPos + vec2(Direction * 32.0f, 0.0f);
+						if(!SafeTravelSegment(MyPos, Step) || IsDangerous(Step + vec2(0, 14)))
+							continue;
+						const float LateralDistance = std::abs(dot(Step - pTarget->GetPos(), Across));
+						if(LateralDistance > BestLateralDistance + 1.0f ||
+							(BestDirection == 0 && LateralDistance > BestLateralDistance - 1.0f &&
+							((m_pPlayer->GetCid() + TargetId) & 1) == (Direction > 0)))
+						{
+							BestDirection = Direction;
+							BestLateralDistance = LateralDistance;
+						}
+					}
+					if(BestDirection != 0)
+						m_InputData.m_Direction = BestDirection;
+					const float BodyLane = std::abs(dot(MyPos - pTarget->GetPos(), Across));
+					const bool NeedBodyClearance = BodyLane < CCharacterCore::PhysicalSize() * 1.8f &&
+						Dist < 240.0f && std::abs(Across.y) > std::abs(Across.x);
+					const bool NeedJump = m_BlockFreezeGoal.y < pTarget->GetPos().y - 32.0f || NeedBodyClearance;
+					if(NeedJump && !(pMe->m_Jumped & 2))
+					{
+						const int Now = GameServer()->Server()->Tick();
+						if(m_LastBlockJumpCheckTick < 0 || Now - m_LastBlockJumpCheckTick >= 6)
+						{
+							m_LastBlockJumpCheckTick = Now;
+							CWorldCore JumpWorld;
+							CCharacterCore JumpPrediction = *pMe;
+							JumpPrediction.Init(&JumpWorld, Collision());
+							JumpPrediction.m_Tuning = pMe->m_Tuning;
+							m_BlockJumpArcSafe = true;
+							for(int Step = 0; Step < 20; Step++)
+							{
+								JumpPrediction.m_Input.m_Direction = m_InputData.m_Direction;
+								JumpPrediction.m_Input.m_Jump = bot_ai::JumpPressAllowed(true,
+									JumpPrediction.m_Jumped, JumpPrediction.m_JumpedTotal, JumpPrediction.m_Vel.y);
+								JumpPrediction.m_Input.m_Hook = 0;
+								JumpPrediction.Tick(true);
+								JumpPrediction.Move();
+								JumpPrediction.Quantize();
+								const vec2 JumpPos = JumpPrediction.m_Pos;
+								if(IsDangerous(JumpPos) || IsDangerous(JumpPos + vec2(0, 14)) ||
+									IsDangerous(JumpPos - vec2(0, 14)) || IsDangerous(JumpPos + vec2(14, 0)) ||
+									IsDangerous(JumpPos - vec2(14, 0)))
+								{
+									m_BlockJumpArcSafe = false;
+									break;
+								}
+							}
+						}
+						m_InputData.m_Jump = bot_ai::JumpPressAllowed(m_BlockJumpArcSafe,
+							pMe->m_Jumped, pMe->m_JumpedTotal, pMe->m_Vel.y);
+					}
+				}
+			}
+			else if(HoldTargetHook && m_HasBlockFreezeGoal && Direct &&
+				Dist < static_cast<float>(Tuning()->m_HookLength) * 0.94f &&
 				Dist >= std::min(static_cast<float>(Tuning()->m_HookLength) * 0.68f,
 					std::max(135.0f, distance(pTarget->GetPos(), m_BlockFreezeGoal) * 0.8f)) &&
 				bot_ai::GoodPullAngle(MyPos.x, MyPos.y, pTarget->GetPos().x, pTarget->GetPos().y,
@@ -1935,8 +2227,11 @@ void CBot::Tick()
 				const float LeadTicks = std::min(6.0f, Dist /
 					std::max(1.0f, static_cast<float>(Tuning()->m_HookFireSpeed)));
 				m_Target = pTarget->GetPos() - MyPos + pTarget->Core()->m_Vel * LeadTicks;
-				m_InputData.m_Hook = 1;
-				CombatHookAim = m_InputData.m_Hook != 0;
+				// Take hook control away from a terrain hook before launching at the
+				// opponent. The release tick is intentional; the next tick gets a clean
+				// rising edge and sends the full-range player hook.
+				CombatHookAim = true;
+				m_InputData.m_Hook = pMe->m_HookState == HOOK_IDLE && !m_LastData.m_Hook;
 			}
 		}
 	}
@@ -1945,6 +2240,7 @@ void CBot::Tick()
 		m_Target = NavigationHookAim;
 		m_pPlayer->to_fire = false;
 	}
+	TryMobilityWeapon();
 	if(m_InputData.m_Hook || m_InputData.m_Fire || m_pPlayer->to_fire)
 	{
 		m_InputData.m_TargetX = m_Target.x;
@@ -1954,6 +2250,7 @@ void CBot::Tick()
 	const int HookedPlayer = pMe->HookedPlayer();
 	if(!m_Rescuing && HookedPlayer >= 0 && GameServer()->IsPlayerFreezeLocked(HookedPlayer))
 		m_InputData.m_Hook = 0;
+	UpdatePetNinja();
 
 
 
@@ -2080,9 +2377,19 @@ void CBot::HandleHook(bool SeeTarget)
 		const bool Obstructed = length(Travel) > 30.0f &&
 			Collision()->FastIntersectLine(pMe->m_Pos,
 				pMe->m_Pos + normalize(Travel) * std::min(length(Travel), 120.0f), nullptr, nullptr);
+		const bool ReadyToBlock = m_Fighting && m_HasBlockFreezeGoal && m_HasBlockStance &&
+			m_ComputeTarget.m_Type == CTarget::TARGET_PLAYER &&
+			m_ComputeTarget.m_PlayerCID >= 0 && m_ComputeTarget.m_PlayerCID < MAX_CLIENTS &&
+			GameServer()->m_apPlayers[m_ComputeTarget.m_PlayerCID] &&
+			GameServer()->m_apPlayers[m_ComputeTarget.m_PlayerCID]->GetCharacter() &&
+			distance(pMe->m_Pos, m_BlockStance) < 140.0f &&
+			!Collision()->FastIntersectLine(pMe->m_Pos,
+				GameServer()->m_apPlayers[m_ComputeTarget.m_PlayerCID]->GetCharacter()->GetPos(), nullptr, nullptr);
 		const bool FallingTowardHazard = pMe->m_Vel.y > 0.5f &&
 			HasFreezeBelow(pMe->m_Pos, std::min(static_cast<float>(Tuning()->m_HookLength), 320.0f));
-		if(!m_InputData.m_Fire && m_LastData.m_Hook == 0 && pMe->m_HookState == HOOK_IDLE &&
+		const bool PreferJumpClimb = (m_Fighting || m_Rescuing || owner >= 0) &&
+			Travel.y < -90.0f && !(pMe->m_Jumped & 2);
+		if(!ReadyToBlock && !m_InputData.m_Fire && m_LastData.m_Hook == 0 && pMe->m_HookState == HOOK_IDLE &&
 			bot_ai::ShouldWallHook(Skill(PET_SKILL_RACE), Skill(PET_SKILL_DEFENSE), Obstructed,
 				Travel.y < -18.0f, FallingTowardHazard, stuck, GameServer()->Server()->Tick(), m_pPlayer->GetCid()) &&
 			(m_LastWallHookPlanTick < 0 || GameServer()->Server()->Tick() - m_LastWallHookPlanTick >= 5))
@@ -2091,7 +2398,7 @@ void CBot::HandleHook(bool SeeTarget)
 			m_LastWallHookPlanTick = GameServer()->Server()->Tick();
 			struct SHookPrediction { float m_BestDistance; float m_Rise; bool m_Hazard; };
 			const vec2 Goal = pMe->m_Pos + Travel;
-			const auto SimulateHook = [this, pMe, Goal](vec2 Aim, bool Hook) {
+			const auto SimulateHook = [this, pMe, Goal, PreferJumpClimb](vec2 Aim, bool Hook) {
 				CWorldCore World;
 				CCharacterCore Predicted = *pMe;
 				Predicted.Init(&World, Collision());
@@ -2101,13 +2408,15 @@ void CBot::HandleHook(bool SeeTarget)
 					(Aim.x > 0 ? 1 : -1) :
 					Goal.x > pMe->m_Pos.x + 28.0f ? 1 :
 					Goal.x < pMe->m_Pos.x - 28.0f ? -1 : 0;
-				Predicted.m_Input.m_Jump = (m_Flags & BFLAG_JUMP) && !(pMe->m_Jumped & 1) ? 1 : 0;
 				Predicted.m_Input.m_Hook = Hook ? 1 : 0;
 				Predicted.m_Input.m_TargetX = Aim.x;
 				Predicted.m_Input.m_TargetY = Aim.y;
 				SHookPrediction Result{distance(pMe->m_Pos, Goal), 0.0f, false};
 				for(int Step = 0; Step < 40; Step++)
 				{
+					Predicted.m_Input.m_Jump = bot_ai::JumpPressAllowed(
+						(m_Flags & BFLAG_JUMP) || PreferJumpClimb,
+						Predicted.m_Jumped, Predicted.m_JumpedTotal, Predicted.m_Vel.y);
 					Predicted.Tick(true);
 					Predicted.Move();
 					Predicted.Quantize();
@@ -2126,6 +2435,8 @@ void CBot::HandleHook(bool SeeTarget)
 			};
 			const bool Simulate = Skill(PET_SKILL_RACE) >= 8 && Skill(PET_SKILL_DEFENSE) >= 6;
 			const SHookPrediction Baseline = Simulate ? SimulateHook(Travel, false) : SHookPrediction{0.0f, 0.0f, false};
+			const bool JumpClimbWorks = Simulate && PreferJumpClimb && !Baseline.m_Hazard &&
+				Baseline.m_Rise >= 64.0f && Baseline.m_BestDistance < length(Travel) - 40.0f;
 
 			const int NumDir = Simulate ? 24 : Skill(PET_SKILL_RACE) >= 7 ? 48 : BOT_HOOK_DIRS;
 
@@ -2151,6 +2462,10 @@ void CBot::HandleHook(bool SeeTarget)
 				if(HitTile && HitTile != TILE_NOHOOK)
 
 				{
+					const float AnchorDistance = distance(pMe->m_Pos, Pos);
+					const float HookLength = static_cast<float>(Tuning()->m_HookLength);
+					if(!FallingTowardHazard && AnchorDistance < HookLength * 0.3f)
+						continue;
 
 					vec2 HookVel = dir*GameServer()->GlobalTuning()->m_HookDragAccel;
 
@@ -2201,6 +2516,9 @@ void CBot::HandleHook(bool SeeTarget)
 							(Baseline.m_Hazard && !Prediction.m_Hazard ? 180.0f : 0.0f) -
 							(Prediction.m_Hazard ? 10000.0f : 0.0f);
 					}
+					// Avoid repeatedly grabbing nearby ledges when a longer anchor can
+					// carry the pet across the obstacle in one sustained pull.
+					Score += std::max(0.0f, AnchorDistance / std::max(1.0f, HookLength) - 0.45f) * 24.0f;
 
 					if(Score > BestScore)
 
@@ -2216,7 +2534,7 @@ void CBot::HandleHook(bool SeeTarget)
 
 			}
 
-			if(length(HookDir) > 32.f && (BestScore > 0.05f || FallingTowardHazard))
+			if(!JumpClimbWorks && length(HookDir) > 32.f && (BestScore > 0.05f || FallingTowardHazard))
 
 			{
 

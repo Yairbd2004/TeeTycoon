@@ -47,6 +47,7 @@ public:
 	int m_LastIndexFrontTile = 0;
 	bool m_Bloody = false;
 	bool m_Bloody_item = false;
+	int m_NextBloodyEffectTick = 0;
 	int m_ReloadMultiplier = 1;
 	bool m_FastReload = false;
 	bool m_Race = false;
@@ -114,6 +115,7 @@ public:
 
 	void GiveWeapon(int Weapon, bool Remove = false);
 	void GiveNinja();
+	void GiveNinjaWeapon();
 	void RemoveNinja();
 	void SetEndlessHook(bool Enable);
 

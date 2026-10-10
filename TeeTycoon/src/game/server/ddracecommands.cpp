@@ -17,8 +17,9 @@
 
 #include <algorithm>
 #include <filesystem>
-#include <fstream>
 #include <iostream>
+#include <ctime>
+#include <sqlite3.h>
 #include <game/race_state.h>
 
 void CGameContext::ConGoLeft(IConsole::IResult *pResult, void *pUserData)
@@ -434,648 +435,334 @@ void CGameContext::ConRainbow(IConsole::IResult *pResult, void *pUserData)
 	}
 }
 
-void CGameContext::ConEventThread(IConsole::IResult *pResult, void *pUserData)
+bool CGameContext::TryStartEvent(int EventType, int ClientId)
 {
-	CGameContext *pSelf = (CGameContext *)pUserData;
-	sqlite3 *db = pSelf->db;
-	const char *sqlStatement = nullptr;
-	std::string strSql;
-	char *errMessage = nullptr;
-		CCharacter *pChr;
-	CCharacter *pCWinner;
-	CPlayer *pPlayer;
-	std::string myText;
-	std::ofstream eventStartFile;
-	std::string msg;
-	int TeleIn = 0, count = 0, TeleOut = 0, eventType = 0;
-	bool eventEnd = false;
-	bool IncTime = false;
-	while(true)
+	if(!db || EventType < 1 || EventType > 5)
 	{
-		std::ifstream EventTypeFile("EventType.txt");
-		std::getline(EventTypeFile, myText);
-		EventTypeFile.close();
-		if(myText == "1")
-		{
-			eventType = 1; //survival.
-		}
-		else if(myText == "2")
-		{
-			eventType = 2; //race.
-		}
-		else if(myText == "3")
-		{
-			eventType = 3; //dm.
-		}
-		else if (myText == "4")
-		{
-			eventType = 4; //freeze race.
-		}
-		else if (myText == "5")
-		{
-			eventType = 5; //fng.
-		}
-		std::ifstream MyReadFile("StartingEvent.txt");
-		std::getline(MyReadFile, myText);
-		MyReadFile.close();
-		if(myText == "1")
-		{
-			//broadcast the current amount of players in the survival(create more thread, with the same while.
-			//std::string msg = "there are currently: " + playersCount + " players registered to the event";
-			//pSelf->SendBroadcast(msg.c_str(), pResult->m_ClientId);
-			//let the players 30 seconds to join.
-			for (int i = 30; i > 0; i--)
-			{
-				for(int j = 0; j < pSelf->Server()->MaxClients(); j++)
-				{
-					if (pSelf->m_apPlayers[j])
-					{
-						count = pSelf->playersJoined.size();
-						msg = "The event start in " + std::to_string(i) + " seconds! Type /join to enter the event. [" + std::to_string(count) + "/" + std::to_string(MAX_CLIENTS) + "]";
-						pSelf->SendBroadcast(msg.c_str(), j);
-					}
-				}
-				_sleep(1000);
-			}
-			//close the event registeration.
-			eventStartFile.open("StartingEvent.txt");
-			eventStartFile << "0";
-			eventStartFile.close();
-			//teleport all the registered players to the event area.
-			if (count > 1)
-			{
-				for(auto it = pSelf->playersJoined.begin(); it != pSelf->playersJoined.end(); ++it)
-				{
-					if(!(std::find(pSelf->ignorePlayers.begin(), pSelf->ignorePlayers.end(), *it) != pSelf->ignorePlayers.end()))
-					{
-						if(eventType == 1)
-						{
-							//set the tele layer to the survival area tele (255).
-							TeleIn = 254;
-						}
-						else if(eventType == 2)
-						{
-							//set the tele layer to the Race area tele (255).
-							TeleIn = 253;
-						}
-						else if(eventType == 3)
-						{
-							//set the tele layer to the Race area tele (255).
-							TeleIn = 252;
-						}
-						else if(eventType == 4)
-						{
-							TeleIn = 251;
-						}
-						else if(eventType == 5)
-						{
-							TeleIn = 250;
-						}
-						pPlayer = pSelf->m_apPlayers[*it]; //convert string to int.
-						if(!pPlayer)
-						{
-							pSelf->ignorePlayers.push_back(*it);
-						}
-						else
-						{
-							pPlayer->playersInEvent = 0;
-							eventEnd = false;
-							pPlayer->hasJoined = false;
-							pChr = pSelf->GetPlayerChar(*it);
-							pChr->m_Race = false;
-							if(eventType == 3)
-							{
-								pChr->m_dm = true;
-								pChr->GiveWeapon(3, false);
-								pChr->GiveWeapon(0, true);
-								pChr->GiveWeapon(1, true);
-								pChr->GiveWeapon(2, true);
-								pChr->GiveWeapon(4, true);
-								pChr->SetActiveWeapon(3);
-							}
-							else if(eventType == 5)
-							{
-								pChr->m_fng = true;
-								pChr->GiveWeapon(4, false);
-								pChr->GiveWeapon(0, false);
-								pChr->GiveWeapon(1, true);
-								pChr->GiveWeapon(2, true);
-								pChr->GiveWeapon(3, true);
-								pChr->SetActiveWeapon(4);
-							}
-							//now tele this player to the event area.
-														TeleOut = pSelf->m_World.m_Core.RandomOr0(pSelf->Collision()->TeleOuts(TeleIn - 1).size());
-							pSelf->SetTeamInvite(pChr->GetPlayer()->GetCid(), 0);
-							pSelf->Teleport(pChr, pSelf->Collision()->TeleOuts(TeleIn - 1)[TeleOut]);
-							pChr->Freeze();
-						}
-					}
-				}
-				_sleep(3000);
-				//now save the count variable for the prizes.
-				for(auto it = pSelf->playersJoined.begin(); it != pSelf->playersJoined.end(); it++)
-				{
-					if(!(std::find(pSelf->ignorePlayers.begin(), pSelf->ignorePlayers.end(), *it) != pSelf->ignorePlayers.end()))
-					{
-						//get the player's CPlayer class variable.
-						pPlayer = pSelf->m_apPlayers[*it]; //convert string to int.
-						if(!pPlayer)
-						{
-							pSelf->ignorePlayers.push_back(*it);
-						}
-						else
-						{
-							pChr = pSelf->GetPlayerChar(*it);
-							if(pChr)
-							{
-								pPlayer->playersInEvent = count;
-								pChr->Unfreeze();
-							}
-						}
-					}
-				}
+		SendChatTarget(ClientId, "The event could not start because the database is unavailable.");
+		return false;
+	}
+	const sqlite3_int64 Now = static_cast<sqlite3_int64>(std::time(nullptr));
+	sqlite3_stmt *pStatement = nullptr;
+	if(sqlite3_prepare_v2(db, "SELECT LAST_START_UNIX, ACTIVE_EVENT FROM TT_EVENT_STATE WHERE ID = 1", -1, &pStatement, nullptr) != SQLITE_OK)
+	{
+		SendChatTarget(ClientId, "The event could not start because its database state could not be read.");
+		return false;
+	}
+	const int StepResult = sqlite3_step(pStatement);
+	const sqlite3_int64 LastStart = StepResult == SQLITE_ROW ? sqlite3_column_int64(pStatement, 0) : 0;
+	const int ActiveEvent = StepResult == SQLITE_ROW ? sqlite3_column_int(pStatement, 1) : 0;
+	sqlite3_finalize(pStatement);
+	if(StepResult != SQLITE_ROW)
+	{
+		SendChatTarget(ClientId, "The event could not start because its database state could not be read.");
+		return false;
+	}
+	if(m_EventState.load() != 0 || ActiveEvent != 0)
+	{
+		SendChatTarget(ClientId, "Another event is already running. Please wait for it to finish.");
+		return false;
+	}
+	const sqlite3_int64 SecondsLeft = 600 - (Now - LastStart);
+	if(LastStart > 0 && SecondsLeft > 0)
+	{
+		char aMessage[128];
+		str_format(aMessage, sizeof(aMessage), "Event votes are on cooldown. Try again in %lld:%02lld.", static_cast<long long>(SecondsLeft / 60), static_cast<long long>(SecondsLeft % 60));
+		SendChatTarget(ClientId, aMessage);
+		return false;
+	}
+	if(sqlite3_prepare_v2(db, "UPDATE TT_EVENT_STATE SET LAST_START_UNIX = ?, ACTIVE_EVENT = ? WHERE ID = 1 AND ACTIVE_EVENT = 0", -1, &pStatement, nullptr) != SQLITE_OK)
+	{
+		SendChatTarget(ClientId, "The event could not start because its database state could not be saved.");
+		return false;
+	}
+	sqlite3_bind_int64(pStatement, 1, Now);
+	sqlite3_bind_int(pStatement, 2, EventType);
+	const bool Saved = sqlite3_step(pStatement) == SQLITE_DONE && sqlite3_changes(db) == 1;
+	sqlite3_finalize(pStatement);
+	if(!Saved)
+	{
+		SendChatTarget(ClientId, "Another event is already running, or the event state could not be saved.");
+		return false;
+	}
+	{
+		std::lock_guard<std::mutex> Lock(m_EventPlayersMutex);
+		playersJoined.clear();
+	}
+	ignorePlayers.clear();
+	m_EventType = EventType;
+	m_EventState = 1;
+	m_EventPhase = 1;
+	m_EventPhaseEndTick = Server()->Tick() + 30LL * Server()->TickSpeed();
+	m_EventNextUpdateTick = Server()->Tick();
+	m_EventRemainingSeconds = 30;
+	m_EventPlayerCount = 0;
+	m_EventWinnerClientId = -1;
+	SendChatTarget(-1, "An event is open for registration. Type /join to participate; it starts in 30 seconds.");
+	return true;
+}
 
-				//let them 1 minutes for the event.
-				for(int i = 60; i > 0; i--)
+void CGameContext::TickEvents()
+{
+	if(m_EventPhase == 0 || Server()->Tick() < m_EventNextUpdateTick)
+		return;
+	const int64_t Now = Server()->Tick();
+	const int TickSpeed = std::max(1, Server()->TickSpeed());
+	m_EventNextUpdateTick = Now + TickSpeed;
+	std::vector<int> Participants;
+	{
+		std::lock_guard<std::mutex> Lock(m_EventPlayersMutex);
+		Participants = playersJoined;
+	}
+	if(m_EventPhase == 1)
+	{
+		const int SecondsLeft = static_cast<int>(std::max<int64_t>(0, (m_EventPhaseEndTick - Now + TickSpeed - 1) / TickSpeed));
+		if(SecondsLeft != m_EventRemainingSeconds || Now >= m_EventPhaseEndTick)
+		{
+			m_EventRemainingSeconds = SecondsLeft;
+			char aMessage[160];
+			str_format(aMessage, sizeof(aMessage), "Event starts in %d seconds. Type /join to enter. [%d/%d]", SecondsLeft, static_cast<int>(Participants.size()), MAX_CLIENTS);
+			for(int ClientId = 0; ClientId < Server()->MaxClients(); ++ClientId)
+				if(m_apPlayers[ClientId])
+					SendBroadcast(aMessage, ClientId);
+		}
+		if(Now < m_EventPhaseEndTick)
+			return;
+		Participants.erase(std::remove_if(Participants.begin(), Participants.end(), [this](int ClientId) {
+			return ClientId < 0 || ClientId >= Server()->MaxClients() || !m_apPlayers[ClientId] || !m_apPlayers[ClientId]->GetCharacter();
+		}), Participants.end());
+		{
+			std::lock_guard<std::mutex> Lock(m_EventPlayersMutex);
+			playersJoined = Participants;
+		}
+		m_EventPlayerCount = static_cast<int>(Participants.size());
+		if(m_EventPlayerCount < 2)
+		{
+			for(int ClientId : Participants)
+			{
+				m_apPlayers[ClientId]->hasJoined = false;
+				SendChatTarget(ClientId, "The event was cancelled because at least two players must join.");
+			}
+			FinishEvent(false);
+			return;
+		}
+		const int EventType = m_EventType.load();
+		const int TeleIn = EventType == 1 ? 254 : EventType == 2 ? 253 : EventType == 3 ? 252 : EventType == 4 ? 251 : 250;
+		const auto &TeleOuts = Collision()->TeleOuts(TeleIn - 1);
+		if(TeleOuts.empty())
+		{
+			for(int ClientId : Participants)
+				SendChatTarget(ClientId, "The event map is missing its configured spawn points; the event was cancelled.");
+			FinishEvent(false);
+			return;
+		}
+		for(int ClientId : Participants)
+		{
+			CPlayer *pPlayer = m_apPlayers[ClientId];
+			CCharacter *pChr = pPlayer->GetCharacter();
+			if(!pChr)
+				continue;
+			pPlayer->playersInEvent = m_EventPlayerCount;
+			pChr->m_Race = false;
+			pChr->m_dm = EventType == 3;
+			pChr->m_fng = EventType == 5;
+			if(EventType == 3)
+			{
+				pChr->GiveWeapon(3, false);
+				pChr->GiveWeapon(0, true);
+				pChr->GiveWeapon(1, true);
+				pChr->GiveWeapon(2, true);
+				pChr->GiveWeapon(4, true);
+				pChr->SetActiveWeapon(3);
+			}
+			else if(EventType == 5)
+			{
+				pChr->GiveWeapon(4, false);
+				pChr->GiveWeapon(0, false);
+				pChr->GiveWeapon(1, true);
+				pChr->GiveWeapon(2, true);
+				pChr->GiveWeapon(3, true);
+				pChr->SetActiveWeapon(4);
+			}
+			SetTeamInvite(ClientId, 0);
+			Teleport(pChr, TeleOuts[m_World.m_Core.RandomOr0(TeleOuts.size())]);
+			pChr->Freeze();
+		}
+		m_EventState = 2;
+		m_EventPhase = 2;
+		m_EventPhaseEndTick = Now + 3LL * TickSpeed;
+		m_EventNextUpdateTick = m_EventPhaseEndTick;
+		SendChatTarget(-1, "Event participants are in position. The event begins in 3 seconds.");
+		return;
+	}
+	if(m_EventPhase == 2)
+	{
+		for(int ClientId : Participants)
+			if(ClientId >= 0 && ClientId < Server()->MaxClients() && m_apPlayers[ClientId])
+				if(CCharacter *pChr = m_apPlayers[ClientId]->GetCharacter())
+					pChr->Unfreeze();
+		m_EventPhase = 3;
+		m_EventRemainingSeconds = m_EventType == 3 || m_EventType == 5 ? 90 : 60;
+		m_EventPhaseEndTick = Now + static_cast<int64_t>(m_EventRemainingSeconds) * TickSpeed;
+		m_EventNextUpdateTick = Now + TickSpeed;
+		SendChatTarget(-1, "The event has started!");
+		return;
+	}
+	if(m_EventPhase != 3)
+		return;
+	const int EventType = m_EventType.load();
+	int AliveCount = 0;
+	int WinnerClientId = -1;
+	const int SecondsLeft = static_cast<int>(std::max<int64_t>(0, (m_EventPhaseEndTick - Now + TickSpeed - 1) / TickSpeed));
+	for(int ClientId : Participants)
+	{
+		if(ClientId < 0 || ClientId >= Server()->MaxClients() || !m_apPlayers[ClientId])
+			continue;
+		CCharacter *pChr = m_apPlayers[ClientId]->GetCharacter();
+		if(!pChr)
+			continue;
+		if(pChr->m_survival)
+			++AliveCount;
+		if((EventType == 2 || EventType == 4) && pChr->m_Race)
+			WinnerClientId = ClientId;
+		char aMessage[128];
+		if(EventType == 1)
+			str_format(aMessage, sizeof(aMessage), "Survive for %d more seconds!", SecondsLeft);
+		else if(EventType == 2)
+			str_format(aMessage, sizeof(aMessage), "Race event ends in %d seconds!", SecondsLeft);
+		else if(EventType == 3)
+			str_format(aMessage, sizeof(aMessage), "Deathmatch ends in %d seconds!", SecondsLeft);
+		else if(EventType == 4)
+			str_format(aMessage, sizeof(aMessage), "Freeze Race ends in %d seconds!", SecondsLeft);
+		else
+			str_format(aMessage, sizeof(aMessage), "FNG ends in %d seconds!", SecondsLeft);
+		SendBroadcast(aMessage, ClientId);
+	}
+	m_EventWinnerClientId = WinnerClientId;
+	const bool TimedOut = Now >= m_EventPhaseEndTick;
+	if(WinnerClientId >= 0 || AliveCount <= 1 || TimedOut)
+		FinishEvent(TimedOut);
+}
+
+void CGameContext::FinishEvent(bool TimedOut)
+{
+	const int EventType = m_EventType.load();
+	const int WinnerClientId = m_EventWinnerClientId;
+	std::vector<int> Participants;
+	{
+		std::lock_guard<std::mutex> Lock(m_EventPlayersMutex);
+		Participants = playersJoined;
+	}
+	const auto &SpawnOuts = Collision()->TeleOuts(0);
+	for(int ClientId : Participants)
+	{
+		if(ClientId < 0 || ClientId >= Server()->MaxClients() || !m_apPlayers[ClientId])
+			continue;
+		CPlayer *pPlayer = m_apPlayers[ClientId];
+		CCharacter *pChr = pPlayer->GetCharacter();
+		const bool Won = EventType == 2 || EventType == 4 ? ClientId == WinnerClientId : pChr && pChr->m_survival;
+		pPlayer->hasJoined = false;
+		if(Won && pPlayer->id > 0 && db)
+		{
+			const int Reward = std::max(0, pPlayer->playersInEvent) * 100;
+			const sqlite3_int64 Money = std::min<sqlite3_int64>(2000000000LL, static_cast<sqlite3_int64>(pPlayer->money) + Reward);
+			const sqlite3_int64 Exp = std::min<sqlite3_int64>(2147483647LL, static_cast<sqlite3_int64>(pPlayer->exp) + Reward);
+			sqlite3_stmt *pStatement = nullptr;
+			if(sqlite3_prepare_v2(db, "UPDATE ACCOUNTS SET MONEY = ?, EXP = ? WHERE NAME = ?", -1, &pStatement, nullptr) == SQLITE_OK)
+			{
+				sqlite3_bind_int64(pStatement, 1, Money);
+				sqlite3_bind_int64(pStatement, 2, Exp);
+				sqlite3_bind_text(pStatement, 3, pPlayer->username.c_str(), -1, SQLITE_TRANSIENT);
+				if(sqlite3_step(pStatement) == SQLITE_DONE && sqlite3_changes(db) == 1)
 				{
-					if (eventType == 1)
-					{
-						count = 0;
-						for(auto it = pSelf->playersJoined.begin(); it != pSelf->playersJoined.end(); ++it)
-						{
-							if(!(std::find(pSelf->ignorePlayers.begin(), pSelf->ignorePlayers.end(), *it) != pSelf->ignorePlayers.end()))
-							{
-								//get the player's CPlayer class variable.
-								pPlayer = pSelf->m_apPlayers[*it]; //convert string to int.
-								if(!pPlayer)
-								{
-									pSelf->ignorePlayers.push_back(*it);
-								}
-								else
-								{
-									pChr = pPlayer->GetCharacter();
-									if(pChr)
-									{
-										if(pChr->m_survival)
-										{
-											count++;
-											msg = "Survive for: " + std::to_string(i) + " seconds to win!";
-											pSelf->SendBroadcast(msg.c_str(), *it);
-										}
-									}
-								}
-							}
-						}
-					}
-					else if(eventType == 2)
-					{
-						count = 0;
-						for(auto it = pSelf->playersJoined.begin(); it != pSelf->playersJoined.end(); ++it)
-						{
-							if(!(std::find(pSelf->ignorePlayers.begin(), pSelf->ignorePlayers.end(), *it) != pSelf->ignorePlayers.end()))
-							{
-								//get the player's CPlayer class variable.
-								pPlayer = pSelf->m_apPlayers[*it]; //convert string to int.
-								if(!pPlayer)
-								{
-									pSelf->ignorePlayers.push_back(*it);
-								}
-								else
-								{
-									pChr = pSelf->GetPlayerChar(*it);
-									if(pChr)
-									{
-										if(pChr->m_survival)
-										{
-											count++;
-										}
-										msg = "Race Event end in: " + std::to_string(i) + " seconds!";
-										pSelf->SendBroadcast(msg.c_str(), *it);
-										if(pChr->m_Race)
-										{
-											pCWinner = pChr;
-											eventEnd = true;
-											break;
-										}
-									}
-								}
-							}
-						}
-					}
-					if(eventType == 3)
-					{
-						if (!IncTime)
-						{
-							i += 30;
-							IncTime = true;
-						}
-						count = 0;
-						for(auto it = pSelf->playersJoined.begin(); it != pSelf->playersJoined.end(); ++it)
-						{
-							if (!(std::find(pSelf->ignorePlayers.begin(), pSelf->ignorePlayers.end(), *it) != pSelf->ignorePlayers.end()))
-							{
-								//get the player's CPlayer class variable.
-								pPlayer = pSelf->m_apPlayers[*it]; //convert string to int.
-								if(!pPlayer)
-								{
-									pSelf->ignorePlayers.push_back(*it);
-								}
-								else
-								{
-									pChr = pSelf->GetPlayerChar(*it);
-									if(pChr)
-									{
-										if(pChr->m_survival)
-										{
-											count++;
-											msg = "Deathmatch event end in: " + std::to_string(i) + " seconds!";
-											pSelf->SendBroadcast(msg.c_str(), *it);
-										}
-									}
-								}
-							}
-						}
-					}
-					else if(eventType == 4)
-					{
-						count = 0;
-						for(auto it = pSelf->playersJoined.begin(); it != pSelf->playersJoined.end(); ++it)
-						{
-							if(!(std::find(pSelf->ignorePlayers.begin(), pSelf->ignorePlayers.end(), *it) != pSelf->ignorePlayers.end()))
-							{
-								//get the player's CPlayer class variable.
-								pPlayer = pSelf->m_apPlayers[*it]; //convert string to int.
-								if(!pPlayer)
-								{
-									pSelf->ignorePlayers.push_back(*it);
-								}
-								else
-								{
-									pChr = pSelf->GetPlayerChar(*it);
-									if(pChr)
-									{
-										if(pChr->m_survival)
-										{
-											count++;
-										}
-										msg = "FreezeRace event end in: " + std::to_string(i) + " seconds!";
-										pSelf->SendBroadcast(msg.c_str(), *it);
-										if(pChr->m_Race)
-										{
-											pCWinner = pChr;
-											eventEnd = true;
-											break;
-										}
-									}
-								}
-							}
-						}
-					}
-					if(eventType == 5)
-					{
-						if(!IncTime)
-						{
-							i += 30;
-							IncTime = true;
-						}
-						count = 0;
-						for(auto it = pSelf->playersJoined.begin(); it != pSelf->playersJoined.end(); ++it)
-						{
-							if(!(std::find(pSelf->ignorePlayers.begin(), pSelf->ignorePlayers.end(), *it) != pSelf->ignorePlayers.end()))
-							{
-								//get the player's CPlayer class variable.
-								pPlayer = pSelf->m_apPlayers[*it]; //convert string to int.
-								if(!pPlayer)
-								{
-									pSelf->ignorePlayers.push_back(*it);
-								}
-								else
-								{
-									pChr = pSelf->GetPlayerChar(*it);
-									if(pChr)
-									{
-										if(pChr->m_survival)
-										{
-											count++;
-											msg = "Fng event end in: " + std::to_string(i) + " seconds!";
-											pSelf->SendBroadcast(msg.c_str(), *it);
-										}
-									}
-								}
-							}
-						}
-					}
-					if (eventType == 1)
-					{
-						if(count <= 1)
-						{
-							for(auto it = pSelf->ignorePlayers.begin(); it != pSelf->ignorePlayers.end(); it++)
-							{
-								pSelf->playersJoined.erase(std::remove(pSelf->playersJoined.begin(), pSelf->playersJoined.end(), *it), pSelf->playersJoined.end());
-							}
-							break;
-						}
-						else
-						{
-							_sleep(1000);
-						}
-					}
-					else if(eventType == 2 || eventType == 4)
-					{
-						if (eventEnd || count <= 1)
-						{
-							eventEnd = false;
-							for(auto it = pSelf->ignorePlayers.begin(); it != pSelf->ignorePlayers.end(); it++)
-							{
-								pSelf->playersJoined.erase(std::remove(pSelf->playersJoined.begin(), pSelf->playersJoined.end(), *it), pSelf->playersJoined.end());
-							}
-							break;
-						}
-						else
-						{
-							_sleep(1000);
-						}
-					}
-					else if (eventType == 3 || eventType == 5)
-					{
-						if(count <= 1)
-						{
-							IncTime = false;
-							for(auto it = pSelf->ignorePlayers.begin(); it != pSelf->ignorePlayers.end(); it++)
-							{
-								pSelf->playersJoined.erase(std::remove(pSelf->playersJoined.begin(), pSelf->playersJoined.end(), *it), pSelf->playersJoined.end());
-							}
-							break;
-						}
-						else
-						{
-							_sleep(1000);
-						}
-					}
+					pPlayer->money = static_cast<int>(Money);
+					pPlayer->exp = static_cast<int>(Exp);
+					char aMessage[128];
+					str_format(aMessage, sizeof(aMessage), "You won the event and received $%d and %d EXP.", Reward, Reward);
+					SendChatTarget(ClientId, aMessage);
 				}
-				if (eventType == 3 && count > 1)
-				{
-					//kill everyone since the event time over and there is more than one survivor.
-					for(auto it = pSelf->playersJoined.begin(); it != pSelf->playersJoined.end(); ++it)
-					{
-						//get the player's CPlayer class variable.
-						pPlayer = pSelf->m_apPlayers[*it]; //convert string to int.
-						pChr = pSelf->GetPlayerChar(*it);
-						if(pChr)
-						{
-							if (pChr->m_survival)
-							{
-								pChr->Die(0, -1);
-							}
-						}
-					}
-				}
-				if (eventType == 2 || eventType == 4)
-				{
-					//kill all the players that aren't the winner.(in the future tp back to their pos before event, dont kill).
-					for(auto it = pSelf->playersJoined.begin(); it != pSelf->playersJoined.end(); ++it)
-					{
-						//get the player's CPlayer class variable.
-						pPlayer = pSelf->m_apPlayers[*it]; //convert string to int.
-						pChr = pSelf->GetPlayerChar(*it);
-						if(pChr)
-						{
-							if(pChr != pCWinner && !(pChr->m_survival || pChr->m_Race))
-							{
-								pChr->Die(0, -1);
-							}
-						}
-					}
-				}
-				//now mark every event as finished.
-				for(auto it = pSelf->playersJoined.begin(); it != pSelf->playersJoined.end(); ++it)
-				{
-					//get the player's CPlayer class variable.
-					pPlayer = pSelf->m_apPlayers[*it]; //convert string to int.
-					if(pPlayer->GetCharacter())
-						pChr = pPlayer->GetCharacter();
-					pPlayer->hasJoined = false;
-					if(((pChr->m_survival && eventType != 4) || (pChr->m_survival && eventType != 2)) || pChr->m_Race)
-					{
-						if (eventType == 2 || eventType == 4)
-						{
-							if(pCWinner)
-								pCWinner->m_Race = false;
-							if (pChr)
-							{
-								pChr->m_Race = false;
-								pChr->SetSolo(false);
-							}
-						}
-						//give the money
-						errMessage = nullptr;
-						if(pPlayer->money + pPlayer->playersInEvent * 100 <= 2000000000)
-							pPlayer->money += pPlayer->playersInEvent * 100;
-						pPlayer->exp += pPlayer->playersInEvent * 100;
-						strSql = "UPDATE ACCOUNTS SET MONEY=" + std::to_string(pPlayer->money) + ", EXP=" + std::to_string(pPlayer->exp) + " WHERE NAME='" + pPlayer->username + "';";
-						sqlStatement = strSql.c_str();
-						sqlite3_exec(db, sqlStatement, nullptr, nullptr, &errMessage);
-						std::string msgWon = pPlayer->username + ", You survived the event and got: " + std::to_string(pPlayer->playersInEvent * 100) + " money and exp!";
-						pSelf->SendChatTarget(pPlayer->GetCid(), msgWon.c_str());
-						errMessage = nullptr;
-						if(pPlayer->exp >= pPlayer->neededExp)
-						{
-							pPlayer->exp -= pPlayer->neededExp;
-							pPlayer->level++;
-							pPlayer->m_Score = pPlayer->level;
-							strSql = "UPDATE ACCOUNTS SET LEVEL=" + std::to_string(pPlayer->level) + " WHERE NAME='" + pPlayer->username + "';";
-							sqlStatement = strSql.c_str();
-							sqlite3_exec(db, sqlStatement, nullptr, nullptr, &errMessage);
-							pPlayer->neededExp = 10000 * (pPlayer->level + 1) * 1.5;
-							std::string msg = "Congratulations! You Leveled up! your current level is: " + std::to_string(pPlayer->level);
-							pSelf->SendChatTarget(pPlayer->GetCid(), msg.c_str());
-							pSelf->ConSetClan(pPlayer);
-						}
-						//tp back to spawn.
-						pPlayer = pSelf->m_apPlayers[*it]; //convert string to int.
-						if (eventType == 3)
-						{
-							pChr->m_dm = false;
-							pChr->GiveWeapon(0, false);
-							pChr->GiveWeapon(1, false);
-						}
-						else if (eventType == 5)
-						{
-							pChr->m_fng = false;
-							pChr->GiveWeapon(0, false);
-							pChr->GiveWeapon(1, false);
-						}
-												int TeleOut = pSelf->m_World.m_Core.RandomOr0(pSelf->Collision()->TeleOuts(0).size());
-						pSelf->Teleport(pChr, pSelf->Collision()->TeleOuts(0)[TeleOut]);
-					}
-					else
-					{
-						pPlayer->playersInEvent = 0;
-					}
-				}
-				//now after the event finished reset the ids file.
-				pSelf->playersJoined.clear();
+				else
+					SendChatTarget(ClientId, "You won the event, but the reward could not be saved.");
+				sqlite3_finalize(pStatement);
 			}
 			else
+				SendChatTarget(ClientId, "You won the event, but the reward could not be saved.");
+		}
+		if(pPlayer->exp >= pPlayer->neededExp && pPlayer->neededExp > 0 && pPlayer->id > 0 && db)
+		{
+			pPlayer->exp -= pPlayer->neededExp;
+			++pPlayer->level;
+			pPlayer->m_Score = pPlayer->level;
+			pPlayer->neededExp = static_cast<int>(10000 * (pPlayer->level + 1) * 1.5);
+			sqlite3_stmt *pStatement = nullptr;
+			if(sqlite3_prepare_v2(db, "UPDATE ACCOUNTS SET LEVEL = ?, EXP = ? WHERE NAME = ?", -1, &pStatement, nullptr) == SQLITE_OK)
 			{
-				pSelf->SendBroadcast("were not enough players to start the event!", pResult->m_ClientId);
-				//mark as finished.
-				for(auto it = pSelf->playersJoined.begin(); it != pSelf->playersJoined.end(); ++it)
-				{
-					//get the player's CPlayer class variable.
-					pPlayer = pSelf->m_apPlayers[*it]; //convert string to int.
-					pPlayer->hasJoined = false;
-				}
-				pSelf->playersJoined.clear();
+				sqlite3_bind_int(pStatement, 1, pPlayer->level);
+				sqlite3_bind_int(pStatement, 2, pPlayer->exp);
+				sqlite3_bind_text(pStatement, 3, pPlayer->username.c_str(), -1, SQLITE_TRANSIENT);
+				sqlite3_step(pStatement);
+				sqlite3_finalize(pStatement);
+				SendChatTarget(ClientId, "Congratulations! You leveled up.");
+				ConSetClan(pPlayer);
 			}
 		}
+		if(pChr)
+		{
+			pChr->m_Race = false;
+			pChr->m_dm = false;
+			pChr->m_fng = false;
+			if(EventType == 2 || EventType == 4)
+				pChr->SetSolo(false);
+			if(TimedOut && EventType == 3 && pChr->m_survival)
+			{
+				pChr->Die(0, -1);
+				pChr = nullptr;
+			}
+			if(pChr && !SpawnOuts.empty())
+				Teleport(pChr, SpawnOuts[m_World.m_Core.RandomOr0(SpawnOuts.size())]);
+		}
+		pPlayer->playersInEvent = 0;
 	}
+	{
+		std::lock_guard<std::mutex> Lock(m_EventPlayersMutex);
+		playersJoined.clear();
+	}
+	ignorePlayers.clear();
+	m_EventPhase = 0;
+	m_EventState = 0;
+	m_EventType = 0;
+	m_EventPhaseEndTick = 0;
+	m_EventNextUpdateTick = 0;
+	m_EventRemainingSeconds = 0;
+	m_EventPlayerCount = 0;
+	m_EventWinnerClientId = -1;
+	if(db)
+		sqlite3_exec(db, "UPDATE TT_EVENT_STATE SET ACTIVE_EVENT = 0 WHERE ID = 1", nullptr, nullptr, nullptr);
+	SendChatTarget(-1, "The event has ended.");
 }
 
-void CGameContext::runThread(IConsole::IResult *pResult, void *pUserData)
+void CGameContext::ConStartEventSurvival(IConsole::IResult *pResult, void *pUserData)
 {
-	CGameContext *pSelf = (CGameContext *)pUserData;
-	if(!pSelf->created)
-	{
-		std::thread tr(&CGameContext::ConEventThread, pResult, pUserData);
-		tr.detach();
-		pSelf->created = true;
-	}
+	((CGameContext *)pUserData)->TryStartEvent(1, pResult->m_ClientId);
 }
-
-void CGameContext::ConStartEventSurvival(IConsole::IResult* pResult, void* pUserData)
-{
-	bool isAlreadyRunning = false;
-	std::string myText;
-	CGameContext *pSelf = (CGameContext *)pUserData;
-	std::ifstream MyReadFile("StartingEvent.txt");
-	std::getline(MyReadFile, myText);
-	MyReadFile.close();
-	if (myText == "1")
-	{
-		pSelf->SendBroadcast("an survival event is still running!", pResult->m_ClientId);
-	}
-	else
-	{
-		pSelf->runThread(pResult, pUserData);
-		//mark event as starting.
-		std::ofstream eventTypeFile;
-		eventTypeFile.open("EventType.txt");
-		eventTypeFile << "1";
-		eventTypeFile.close();
-		std::ofstream eventStartFile;
-		eventStartFile.open("StartingEvent.txt");
-		eventStartFile << "1";
-		eventStartFile.close();
-	}
-}
-
 void CGameContext::ConStartEventRace(IConsole::IResult *pResult, void *pUserData)
 {
-	bool isAlreadyRunning = false;
-	std::string myText;
-	CGameContext *pSelf = (CGameContext *)pUserData;
-	std::ifstream MyReadFile("StartingEvent.txt");
-	std::getline(MyReadFile, myText);
-	MyReadFile.close();
-	if(myText == "1")
-	{
-		pSelf->SendBroadcast("an race event is still running!", pResult->m_ClientId);
-	}
-	else
-	{
-		pSelf->runThread(pResult, pUserData);
-		//mark event as starting.
-		std::ofstream eventTypeFile;
-		eventTypeFile.open("EventType.txt");
-		eventTypeFile << "2";
-		eventTypeFile.close();
-		std::ofstream eventStartFile;
-		eventStartFile.open("StartingEvent.txt");
-		eventStartFile << "1";
-		eventStartFile.close();
-	}
+	((CGameContext *)pUserData)->TryStartEvent(2, pResult->m_ClientId);
 }
 
 void CGameContext::ConStartEventDm(IConsole::IResult *pResult, void *pUserData)
 {
-	bool isAlreadyRunning = false;
-	std::string myText;
-	CGameContext *pSelf = (CGameContext *)pUserData;
-	std::ifstream MyReadFile("StartingEvent.txt");
-	std::getline(MyReadFile, myText);
-	MyReadFile.close();
-	if(myText == "1")
-	{
-		pSelf->SendBroadcast("an DeathMatch event is still running!", pResult->m_ClientId);
-	}
-	else
-	{
-		pSelf->runThread(pResult, pUserData);
-		//mark event as starting.
-		std::ofstream eventTypeFile;
-		eventTypeFile.open("EventType.txt");
-		eventTypeFile << "3";
-		eventTypeFile.close();
-		std::ofstream eventStartFile;
-		eventStartFile.open("StartingEvent.txt");
-		eventStartFile << "1";
-		eventStartFile.close();
-	}
+	((CGameContext *)pUserData)->TryStartEvent(3, pResult->m_ClientId);
 }
 
 void CGameContext::ConStartEventFreezeRace(IConsole::IResult *pResult, void *pUserData)
 {
-	bool isAlreadyRunning = false;
-	std::string myText;
-	CGameContext *pSelf = (CGameContext *)pUserData;
-	std::ifstream MyReadFile("StartingEvent.txt");
-	std::getline(MyReadFile, myText);
-	MyReadFile.close();
-	if(myText == "1")
-	{
-		pSelf->SendBroadcast("an race event is still running!", pResult->m_ClientId);
-	}
-	else
-	{
-		pSelf->runThread(pResult, pUserData);
-		//mark event as starting.
-		std::ofstream eventTypeFile;
-		eventTypeFile.open("EventType.txt");
-		eventTypeFile << "4";
-		eventTypeFile.close();
-		std::ofstream eventStartFile;
-		eventStartFile.open("StartingEvent.txt");
-		eventStartFile << "1";
-		eventStartFile.close();
-	}
+	((CGameContext *)pUserData)->TryStartEvent(4, pResult->m_ClientId);
 }
 
 void CGameContext::ConStartEventFng(IConsole::IResult *pResult, void *pUserData)
 {
-	bool isAlreadyRunning = false;
-	std::string myText;
-	CGameContext *pSelf = (CGameContext *)pUserData;
-	std::ifstream MyReadFile("StartingEvent.txt");
-	std::getline(MyReadFile, myText);
-	MyReadFile.close();
-	if(myText == "1")
-	{
-		pSelf->SendBroadcast("an fng event is still running!", pResult->m_ClientId);
-	}
-	else
-	{
-		pSelf->runThread(pResult, pUserData);
-		//mark event as starting.
-		std::ofstream eventTypeFile;
-		eventTypeFile.open("EventType.txt");
-		eventTypeFile << "5";
-		eventTypeFile.close();
-		std::ofstream eventStartFile;
-		eventStartFile.open("StartingEvent.txt");
-		eventStartFile << "1";
-		eventStartFile.close();
-	}
+	((CGameContext *)pUserData)->TryStartEvent(5, pResult->m_ClientId);
 }
 
 //need to add tunning for each player itself instead of server tunning, then i can do it for only one player as i want to.
@@ -1433,9 +1120,9 @@ void CGameContext::SetTeamInvite(int id, int inviteID)
 	pController->Teams().SetForceCharacterTeam(id, inviteID);
 }
 
-void CGameContext::Teleport(CCharacter *pChr, vec2 Pos)
+void CGameContext::Teleport(CCharacter *pChr, vec2 Pos, bool ForceBot)
 {
-	if(!pChr || (pChr->GetPlayer()->m_IsBot && IsBotFrozen(pChr)))
+	if(!pChr || (!ForceBot && pChr->GetPlayer()->m_IsBot && IsBotFrozen(pChr)))
 		return;
 	pChr->SetPosition(Pos);
 	pChr->m_Pos = Pos;
@@ -1479,12 +1166,13 @@ void CGameContext::ConToCheckTeleporter(IConsole::IResult *pResult, void *pUserD
 void CGameContext::ConTeleport(IConsole::IResult *pResult, void *pUserData)
 {
 	CGameContext *pSelf = (CGameContext *)pUserData;
-	if(!CheckClientId(pResult->m_ClientId))
+	const bool HasConsoleCaller = !CheckClientId(pResult->m_ClientId);
+	if(HasConsoleCaller && pResult->NumArguments() != 2)
 		return;
 	const bool HasSource = pResult->NumArguments() == 2;
 	int Tele = HasSource ? pResult->GetVictim(0) : pResult->m_ClientId;
 	int TeleTo = pResult->NumArguments() ? pResult->GetVictim(HasSource ? 1 : 0) : pResult->m_ClientId;
-	int AuthLevel = pSelf->Server()->GetAuthedState(pResult->m_ClientId);
+	int AuthLevel = HasConsoleCaller ? AUTHED_ADMIN : pSelf->Server()->GetAuthedState(pResult->m_ClientId);
 
 	if(Tele != pResult->m_ClientId && AuthLevel < g_Config.m_SvTeleOthersAuthLevel)
 	{
@@ -1493,13 +1181,13 @@ void CGameContext::ConTeleport(IConsole::IResult *pResult, void *pUserData)
 	}
 
 	CCharacter *pChr = pSelf->GetPlayerChar(Tele);
-	CPlayer *pPlayer = pSelf->m_apPlayers[pResult->m_ClientId];
+	CPlayer *pPlayer = CheckClientId(pResult->m_ClientId) ? pSelf->m_apPlayers[pResult->m_ClientId] : nullptr;
 
 	if(pChr && pPlayer && pSelf->GetPlayerChar(TeleTo))
 	{
 		// default to view pos when character is not available
 		vec2 Pos = pSelf->m_apPlayers[TeleTo]->m_ViewPos;
-		if(pResult->NumArguments() == 0 && !pPlayer->IsPaused() && pChr->IsAlive())
+		if(pResult->NumArguments() == 0 && pPlayer && !pPlayer->IsPaused() && pChr->IsAlive())
 		{
 			vec2 Target = vec2(pChr->Core()->m_Input.m_TargetX, pChr->Core()->m_Input.m_TargetY);
 			Pos = pPlayer->m_CameraInfo.ConvertTargetToWorld(pChr->GetPos(), Target);

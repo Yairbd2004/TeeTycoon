@@ -1755,6 +1755,7 @@ set(EXPECTED_DATA
   maps/LearnToPlay.map
   maps/Sunny\ Side\ Up.map
   maps/TeeTycoon.map
+  maps/TeeTycoonV1.map
   maps/Tsunami.map
   maps/Tutorial.map
   maps/coverage.map
@@ -1776,6 +1777,7 @@ set(EXPECTED_DATA
   maps7/LearnToPlay.map
   maps7/Sunny\ Side\ Up.map
   maps7/TeeTycoon.map
+  maps7/TeeTycoonV1.map
   maps7/Tsunami.map
   maps7/Tutorial.map
   maps7/readme.txt

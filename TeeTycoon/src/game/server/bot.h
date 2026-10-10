@@ -151,6 +151,11 @@ public:
 	std::unordered_set<std::string> m_HelpNames;
 	std::unordered_set<std::string> m_BlockNames;
 	int m_FreezeRespawnSeconds = 10;
+	int m_NinjaActiveUntilTick = 0;
+	int m_NinjaCooldownUntilTick = 0;
+	int m_NinjaNextDashTick = 0;
+	int m_MobilityShotgunTick = 0;
+	int m_MobilityGrenadeTick = 0;
 	int m_FrozenSinceTick = -1;
 	bool m_RespawnFromFreeze = false;
 	bool m_RaceToFrozenOwner = false;
@@ -186,9 +191,12 @@ public:
 	vec2 m_BlockStance = vec2(0, 0);
 	vec2 m_BlockWaypoint = vec2(0, 0);
 	vec2 m_LastBlockTargetPos = vec2(0, 0);
+	bool m_LastBlockTargetOnFreeze = false;
 	int m_LastBlockStancePlanTick = -1;
 	bool m_HasBlockFreezeGoal = false;
 	bool m_HasBlockStance = false;
+	int m_LastBlockJumpCheckTick = -1;
+	bool m_BlockJumpArcSafe = false;
 	vec2 m_LastProgressPos = vec2(0, 0);
 	int m_LastProgressTick = -1;
 	vec2 m_LastGoalProgressTarget = vec2(0, 0);
@@ -197,7 +205,12 @@ public:
 	int m_LastRouteRefreshTick = -1;
 	bool m_TriedWallJump = false;
 	int m_LastWallHookPlanTick = -1;
+	int m_DefenseHookUntilTick = -1;
+	vec2 m_DefenseHookAim = vec2(0, 1);
 	bool CanUseWeapon(int Weapon) const;
+	void ApplyPurchasedWeapons();
+	void UpdatePetNinja();
+	bool TryMobilityWeapon();
 	bool CanHammerHit(CCharacter *pTarget);
 	bool FindLocalRoute(vec2 Start, vec2 Goal, vec2 *pWaypoint);
 	bool HasReachableClimbHook(vec2 Position);

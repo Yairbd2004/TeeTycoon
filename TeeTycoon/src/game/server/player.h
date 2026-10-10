@@ -103,6 +103,12 @@ public:
 	int health = 0;
 	int armor = 0;
 	int weaponBot = 0;
+	int m_PetWeaponMask = 0;
+	int m_PetPopupEmoteMask = 1 << 2; // Hearts is included for free.
+	int m_PetPopupEmote = 2;
+	int m_PetFacialEmoteMask = 1 << EMOTE_NORMAL;
+	int m_PetFacialEmote = EMOTE_NORMAL;
+	int m_BotDisplayLatency = 0;
 	int m_aPetSkills[NUM_PET_SKILLS] = {1, 1, 1, 1, 1};
 	int kills = 0;
 	int exp = 0;
@@ -124,6 +130,7 @@ public:
 	// Bot flag
 	bool m_IsBot = false;
 	bool m_IsBlocker = false;
+	bool m_IsVirtualBot = false;
 	bool to_fire = false;
 	bool m_ownBot = false;
 	int botId = -1;
@@ -324,6 +331,7 @@ public:
 	int m_DDNetVersionKickTick;
 
 	int GetDefaultEmote() const;
+	void SetDefaultEmote(int Emote) { m_DefEmote = Emote; }
 	void OverrideDefaultEmote(int Emote, int Tick);
 	bool CanOverrideDefaultEmote() const;
 

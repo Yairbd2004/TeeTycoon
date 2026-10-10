@@ -7,6 +7,7 @@
 #include "score.h"
 
 #include <base/log.h>
+#include <base/color.h>
 #include <base/time.h>
 #include <engine/shared/config.h>
 #include <engine/shared/protocol.h>
@@ -19,11 +20,96 @@
 #include <game/version.h>
 
 #include <sqlite3.h>
+#include <cmath>
+#include <cstdlib>
 #include <iostream>
-#include <fstream>
 #include <filesystem>
+#include <sstream>
 #include <string>
 #include <utility>
+#include <vector>
+
+static constexpr int MAX_HOUSE_LEVEL = 4;
+
+static constexpr int PetWeaponBit(int Weapon)
+{
+	return 1 << Weapon;
+}
+
+static constexpr int PET_WEAPON_PRICES[NUM_WEAPONS] = {0, 10000, 25000, 50000, 100000, 250000};
+static constexpr const char *PET_WEAPON_NAMES[NUM_WEAPONS] = {"Hammer", "Gun", "Shotgun", "Grenade", "Laser", "Ninja"};
+static constexpr const char *PET_WEAPON_KEYS[NUM_WEAPONS] = {"hammer", "gun", "shotgun", "grenade", "laser", "ninja"};
+static constexpr int PET_POPUP_EMOTES[] = {EMOTICON_HEARTS, EMOTICON_GHOST, EMOTICON_SUSHI, EMOTICON_MUSIC, EMOTICON_ZOMG, EMOTICON_DEVILTEE};
+static constexpr const char *PET_POPUP_EMOTE_NAMES[] = {"Hearts", "Ghost", "Sushi", "Music", "ZOMG", "Deviltee"};
+static constexpr const char *PET_POPUP_EMOTE_KEYS[] = {"hearts", "ghost", "sushi", "music", "zomg", "deviltee"};
+static constexpr int PET_POPUP_EMOTE_PRICES[] = {0, 5000, 7500, 7500, 10000, 15000};
+static constexpr int PET_FACIAL_EMOTES[] = {EMOTE_NORMAL, EMOTE_HAPPY, EMOTE_SURPRISE, EMOTE_ANGRY, EMOTE_PAIN, EMOTE_BLINK};
+static constexpr const char *PET_FACIAL_EMOTE_NAMES[] = {"Normal", "Happy", "Surprise", "Angry", "Pain", "Blink"};
+static constexpr const char *PET_FACIAL_EMOTE_KEYS[] = {"normal", "happy", "surprise", "angry", "pain", "blink"};
+static constexpr int PET_FACIAL_EMOTE_PRICES[] = {0, 5000, 5000, 7500, 5000, 5000};
+
+// Chat commands must originate from an actual network client. Pet IDs are
+// virtual actor IDs and must never be interpreted as command callers.
+static CPlayer *GetPetCommandOwner(CGameContext *pSelf, int ClientId)
+{
+	if(ClientId < 0 || ClientId >= pSelf->Server()->MaxClients() ||
+		!pSelf->m_apPlayers[ClientId] || pSelf->m_apPlayers[ClientId]->m_IsBot)
+	{
+		pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "TeeTycoon", "This pet command requires an in-game player.");
+		return nullptr;
+	}
+	return pSelf->m_apPlayers[ClientId];
+}
+static constexpr int PET_SKIN_COPY_PRICE = 50000;
+
+static std::string SerializeTeeInfo(const CTeeInfo &Info)
+{
+	std::string Data;
+	auto Add = [&Data](const std::string &Value) {
+		if(!Data.empty())
+			Data.push_back('\x1f');
+		Data += Value;
+	};
+	Add(Info.m_aSkinName);
+	Add(std::to_string(Info.m_UseCustomColor));
+	Add(std::to_string(Info.m_ColorBody));
+	Add(std::to_string(Info.m_ColorFeet));
+	for(int Part = 0; Part < protocol7::NUM_SKINPARTS; Part++)
+	{
+		Add(Info.m_aaSkinPartNames[Part]);
+		Add(std::to_string(Info.m_aUseCustomColors[Part]));
+		Add(std::to_string(Info.m_aSkinPartColors[Part]));
+	}
+	return Data;
+}
+
+static bool DeserializeTeeInfo(const char *pData, CTeeInfo *pInfo)
+{
+	if(!pData || !pData[0] || !pInfo)
+		return false;
+	std::vector<std::string> Fields;
+	std::stringstream Stream(pData);
+	std::string Field;
+	while(std::getline(Stream, Field, '\x1f'))
+		Fields.push_back(Field);
+	if(Fields.size() != 4 + protocol7::NUM_SKINPARTS * 3 || Fields[0].empty() ||
+		Fields[0].size() >= sizeof(pInfo->m_aSkinName))
+		return false;
+	str_copy(pInfo->m_aSkinName, Fields[0].c_str());
+	pInfo->m_UseCustomColor = str_toint(Fields[1].c_str()) != 0;
+	pInfo->m_ColorBody = str_toint(Fields[2].c_str());
+	pInfo->m_ColorFeet = str_toint(Fields[3].c_str());
+	for(int Part = 0; Part < protocol7::NUM_SKINPARTS; Part++)
+	{
+		const size_t Offset = 4 + Part * 3;
+		if(Fields[Offset].size() >= sizeof(pInfo->m_aaSkinPartNames[Part]))
+			return false;
+		str_copy(pInfo->m_aaSkinPartNames[Part], Fields[Offset].c_str());
+		pInfo->m_aUseCustomColors[Part] = str_toint(Fields[Offset + 1].c_str()) != 0;
+		pInfo->m_aSkinPartColors[Part] = str_toint(Fields[Offset + 2].c_str());
+	}
+	return true;
+}
 
 static bool ResolvePetIngameName(const char *pInput, std::string *pName)
 {
@@ -76,10 +162,10 @@ void CGameContext::RefreshTeeTycoonVoteMenu(int ClientId)
 			Add("Money: $" + std::to_string(pPlayer->money));
 			Add("Level: " + std::to_string(pPlayer->level) + " | XP: " + std::to_string(pPlayer->exp) + "/" + std::to_string(pPlayer->neededExp));
 			Add(pPlayer->rank < 100 ? "Money tile Lv " + std::to_string(pPlayer->rank) + " -> " + std::to_string(pPlayer->rank + 1) + " ($" + std::to_string(10000LL * (pPlayer->rank + 1)) + ")" : "Money tile Lv 100 (MAX)", pPlayer->rank < 100 ? "tt_menu_action buy_farm" : "");
-			Add(pPlayer->house < 2 ? "House Lv " + std::to_string(pPlayer->house) + " -> " + std::to_string(pPlayer->house + 1) + " ($" + std::to_string(1000000LL * (pPlayer->house + 2)) + ")" : "House Lv 2 (MAX)", pPlayer->house < 2 ? "tt_menu_action buy_house" : "");
+			Add(pPlayer->house < MAX_HOUSE_LEVEL ? "House Lv " + std::to_string(pPlayer->house) + " -> " + std::to_string(pPlayer->house + 1) + " ($" + std::to_string(1000000LL * (pPlayer->house + 2)) + ")" : "House Lv 4 (MAX)", pPlayer->house < MAX_HOUSE_LEVEL ? "tt_menu_action buy_house" : "");
 			Add(pPlayer->vip < 5 ? "VIP Lv " + std::to_string(pPlayer->vip) + " -> " + std::to_string(pPlayer->vip + 1) + " ($" + std::to_string(50000LL * (pPlayer->vip + 1)) + ")" : "VIP Lv 5 (MAX)", pPlayer->vip < 5 ? "tt_menu_action buy_vip" : "");
 			Add("Rebirth " + std::to_string(pPlayer->rebirth) + " -> " + std::to_string(pPlayer->rebirth + 1) + " ($" + std::to_string(1000000LL * (pPlayer->rebirth + 1)) + ")", "tt_menu_action buy_rebirth");
-			Add("Rebirth requires House Lv 2; resets upgrades");
+			Add("Rebirth requires House Lv 4; resets upgrades");
 		}
 		else
 			Add("Log in with /login to view money and upgrades");
@@ -94,13 +180,15 @@ void CGameContext::RefreshTeeTycoonVoteMenu(int ClientId)
 			bool HasPet = false;
 			bool PetDataAvailable = false;
 			std::string Name;
-			int Level = 0, Exp = 0, Health = 0, Armor = 0, Weapon = 0, Kills = 0, FreezeSeconds = 10;
+			int Level = 0, Exp = 0, Health = 0, Armor = 0, WeaponMask = 0, Kills = 0, FreezeSeconds = 10;
+			int PopupEmoteMask = 1 << 2, ActivePopupEmote = EMOTICON_HEARTS;
+			int FacialEmoteMask = 1 << EMOTE_NORMAL, ActiveFacialEmote = EMOTE_NORMAL;
 			int HelpCount = 0, BlockCount = 0;
 			int aSkills[NUM_PET_SKILLS] = {1, 1, 1, 1, 1};
 			if(db)
 			{
 				sqlite3_stmt *pStatement = nullptr;
-				if(sqlite3_prepare_v2(db, "SELECT NAME, LEVEL, EXP, HEALTH, ARMOR, WEAPON, KILLS, SKILL_RACE, SKILL_BLOCKER, SKILL_DEFENSE, SKILL_HELPER, SKILL_AIM, FREEZE_RESPAWN_SECONDS FROM BOTS WHERE OWNER_NAME = ? LIMIT 1", -1, &pStatement, nullptr) == SQLITE_OK)
+				if(sqlite3_prepare_v2(db, "SELECT NAME, LEVEL, EXP, HEALTH, ARMOR, WEAPON, KILLS, SKILL_RACE, SKILL_BLOCKER, SKILL_DEFENSE, SKILL_HELPER, SKILL_AIM, FREEZE_RESPAWN_SECONDS, PET_WEAPONS, PET_POPUP_EMOTES, PET_POPUP_EMOTE, PET_FACIAL_EMOTES, PET_FACIAL_EMOTE FROM BOTS WHERE OWNER_NAME = ? LIMIT 1", -1, &pStatement, nullptr) == SQLITE_OK)
 				{
 					sqlite3_bind_text(pStatement, 1, pPlayer->username.c_str(), -1, SQLITE_TRANSIENT);
 					const int StepResult = sqlite3_step(pStatement);
@@ -114,11 +202,15 @@ void CGameContext::RefreshTeeTycoonVoteMenu(int ClientId)
 						Exp = sqlite3_column_int(pStatement, 2);
 						Health = sqlite3_column_int(pStatement, 3);
 						Armor = sqlite3_column_int(pStatement, 4);
-						Weapon = sqlite3_column_int(pStatement, 5);
 						Kills = sqlite3_column_int(pStatement, 6);
 						for(int Skill = 0; Skill < NUM_PET_SKILLS; Skill++)
 							aSkills[Skill] = PetSkillLevel(sqlite3_column_int(pStatement, 7 + Skill));
 						FreezeSeconds = sqlite3_column_int(pStatement, 12);
+						WeaponMask = sqlite3_column_int(pStatement, 13);
+						PopupEmoteMask = sqlite3_column_int(pStatement, 14);
+						ActivePopupEmote = sqlite3_column_int(pStatement, 15);
+						FacialEmoteMask = sqlite3_column_int(pStatement, 16);
+						ActiveFacialEmote = sqlite3_column_int(pStatement, 17);
 					}
 				}
 				sqlite3_finalize(pStatement);
@@ -146,7 +238,11 @@ void CGameContext::RefreshTeeTycoonVoteMenu(int ClientId)
 				Exp = pPet->exp;
 				Health = pPet->health;
 				Armor = pPet->armor;
-				Weapon = pPet->weaponBot;
+				WeaponMask = pPet->m_PetWeaponMask;
+				PopupEmoteMask = pPet->m_PetPopupEmoteMask;
+				ActivePopupEmote = pPet->m_PetPopupEmote;
+				FacialEmoteMask = pPet->m_PetFacialEmoteMask;
+				ActiveFacialEmote = pPet->m_PetFacialEmote;
 				Kills = pPet->kills;
 				for(int Skill = 0; Skill < NUM_PET_SKILLS; Skill++)
 					aSkills[Skill] = PetSkillLevel(pPet->m_aPetSkills[Skill]);
@@ -161,12 +257,58 @@ void CGameContext::RefreshTeeTycoonVoteMenu(int ClientId)
 			}
 			else
 			{
-				static const char *s_apWeapons[] = {"Hammer", "Gun", "Shotgun", "Grenade", "Rifle"};
-				const char *pWeapon = Weapon >= 0 && Weapon < 5 ? s_apWeapons[Weapon] : "Unknown";
 				Add("Pet: " + Name + (Spawned ? " (spawned)" : " (not spawned)"));
+				Add("Rename pet: /pet_rename \"name\" ($25000; max 15 UTF-8 bytes)");
+				Add("Change your skin and colors first; copy them to the pet ($50000; repeatable)", "tt_menu_action pet_skin_copy");
+				Add("Advanced: /pet_skin_set <skin> <body-color> <feet-color>");
 				Add("Level: " + std::to_string(Level) + " | XP: " + std::to_string(Exp) + "/" + std::to_string(15000LL * (Level + 1)));
 				Add("Health: " + std::to_string(Health) + " | Armor: " + std::to_string(Armor));
-				Add(std::string("Weapon: ") + pWeapon + " | Kills: " + std::to_string(Kills));
+				std::string OwnedWeapons = "Owned weapons: Hammer";
+				for(int WeaponId = WEAPON_GUN; WeaponId < NUM_WEAPONS; WeaponId++)
+					if(WeaponMask & PetWeaponBit(WeaponId))
+						OwnedWeapons += std::string(", ") + PET_WEAPON_NAMES[WeaponId];
+				Add(OwnedWeapons + " | Kills: " + std::to_string(Kills));
+				Add("Buy permanent pet weapons:");
+				for(int WeaponId = WEAPON_GUN; WeaponId < NUM_WEAPONS; WeaponId++)
+				{
+					const std::string Action = "tt_menu_action pet_weapon_" + std::string(PET_WEAPON_KEYS[WeaponId]);
+					if(WeaponMask & PetWeaponBit(WeaponId))
+						Add(std::string(PET_WEAPON_NAMES[WeaponId]) + " (owned permanently)");
+					else
+						Add("Buy " + std::string(PET_WEAPON_NAMES[WeaponId]) + " ($" + std::to_string(PET_WEAPON_PRICES[WeaponId]) + ")", Action.c_str());
+				}
+				Add("Ninja bursts last at most 10 seconds; the pet only uses them when you're far away.");
+				std::string ActiveFaceName = "Normal";
+				for(size_t Emote = 0; Emote < sizeof(PET_FACIAL_EMOTES) / sizeof(PET_FACIAL_EMOTES[0]); Emote++)
+					if(ActiveFacialEmote == PET_FACIAL_EMOTES[Emote])
+						ActiveFaceName = PET_FACIAL_EMOTE_NAMES[Emote];
+				Add("Facial emote (eyes): " + ActiveFaceName);
+				for(size_t Emote = 0; Emote < sizeof(PET_FACIAL_EMOTES) / sizeof(PET_FACIAL_EMOTES[0]); Emote++)
+				{
+					const int Bit = 1 << PET_FACIAL_EMOTES[Emote];
+					const std::string Key = PET_FACIAL_EMOTE_KEYS[Emote];
+					const std::string Label = PET_FACIAL_EMOTE_NAMES[Emote];
+					if(!(FacialEmoteMask & Bit))
+						Add("Buy " + Label + " facial emote ($" + std::to_string(PET_FACIAL_EMOTE_PRICES[Emote]) + ")", ("tt_menu_action pet_face_buy_" + Key).c_str());
+					else
+						Add(Label + (ActiveFacialEmote == PET_FACIAL_EMOTES[Emote] ? " facial emote (ACTIVE)" : " facial emote (owned)"), ("tt_menu_action pet_face_use_" + Key).c_str());
+				}
+				std::string ActivePopupName = "Off";
+				for(size_t Emote = 0; Emote < sizeof(PET_POPUP_EMOTES) / sizeof(PET_POPUP_EMOTES[0]); Emote++)
+					if(ActivePopupEmote == PET_POPUP_EMOTES[Emote])
+						ActivePopupName = PET_POPUP_EMOTE_NAMES[Emote];
+				Add("Popup emoticon: " + ActivePopupName);
+				for(size_t Emote = 0; Emote < sizeof(PET_POPUP_EMOTES) / sizeof(PET_POPUP_EMOTES[0]); Emote++)
+				{
+					const int Bit = 1 << PET_POPUP_EMOTES[Emote];
+					const std::string Key = PET_POPUP_EMOTE_KEYS[Emote];
+					const std::string Label = PET_POPUP_EMOTE_NAMES[Emote];
+					if(!(PopupEmoteMask & Bit))
+						Add("Buy " + Label + " popup emoticon ($" + std::to_string(PET_POPUP_EMOTE_PRICES[Emote]) + ")", ("tt_menu_action pet_emote_buy_" + Key).c_str());
+					else
+						Add(Label + (ActivePopupEmote == PET_POPUP_EMOTES[Emote] ? " popup emoticon (ACTIVE)" : " popup emoticon (owned)"), ("tt_menu_action pet_emote_use_" + Key).c_str());
+				}
+				Add(ActivePopupEmote < 0 ? "Stop popup emoticons (ACTIVE)" : "Stop popup emoticons", "tt_menu_action pet_emote_use_off");
 				int Total = 0;
 				for(int Skill = 0; Skill < NUM_PET_SKILLS; Skill++)
 					Total += aSkills[Skill];
@@ -298,6 +440,55 @@ void CGameContext::ConTeeTycoonMenuAction(IConsole::IResult *pResult, void *pUse
 		pCommand = "pet_upgrade helper";
 	else if(str_comp(pAction, "pet_upgrade_aim") == 0)
 		pCommand = "pet_upgrade aim";
+	else if(str_comp(pAction, "pet_weapon_gun") == 0)
+		pCommand = "pet_weapon gun";
+	else if(str_comp(pAction, "pet_weapon_shotgun") == 0)
+		pCommand = "pet_weapon shotgun";
+	else if(str_comp(pAction, "pet_weapon_grenade") == 0)
+		pCommand = "pet_weapon grenade";
+	else if(str_comp(pAction, "pet_weapon_laser") == 0)
+		pCommand = "pet_weapon laser";
+	else if(str_comp(pAction, "pet_weapon_ninja") == 0)
+		pCommand = "pet_weapon ninja";
+	else if(str_comp(pAction, "pet_skin_copy") == 0)
+		pCommand = "pet_skin_copy";
+	else if(str_startswith(pAction, "pet_emote_buy_") || str_startswith(pAction, "pet_emote_use_"))
+	{
+		const bool Buy = str_startswith(pAction, "pet_emote_buy_");
+		const char *pKey = pAction + (Buy ? str_length("pet_emote_buy_") : str_length("pet_emote_use_"));
+		static const char *const apKeys[] = {"hearts", "ghost", "sushi", "music", "zomg", "deviltee", "off"};
+		bool Valid = false;
+		for(const char *pKnownKey : apKeys)
+			Valid |= str_comp(pKey, pKnownKey) == 0;
+		if(Valid && !(Buy && str_comp(pKey, "off") == 0))
+		{
+			char aCommand[96];
+			str_format(aCommand, sizeof(aCommand), "pet_emoticon %s %s", pKey, Buy ? "buy" : "use");
+			const int OldFlagMask = pSelf->Console()->FlagMask();
+			pSelf->Console()->SetFlagMask(CFGFLAG_CHAT | CFGFLAG_SERVER);
+			pSelf->Console()->ExecuteLine(aCommand, ClientId, false);
+			pSelf->Console()->SetFlagMask(OldFlagMask);
+			return;
+		}
+	}
+	else if(str_startswith(pAction, "pet_face_buy_") || str_startswith(pAction, "pet_face_use_"))
+	{
+		const bool Buy = str_startswith(pAction, "pet_face_buy_");
+		const char *pKey = pAction + (Buy ? str_length("pet_face_buy_") : str_length("pet_face_use_"));
+		bool Valid = false;
+		for(const char *pKnownKey : PET_FACIAL_EMOTE_KEYS)
+			Valid |= str_comp(pKey, pKnownKey) == 0;
+		if(Valid)
+		{
+			char aCommand[96];
+			str_format(aCommand, sizeof(aCommand), "pet_facial_emote %s %s", pKey, Buy ? "buy" : "use");
+			const int OldFlagMask = pSelf->Console()->FlagMask();
+			pSelf->Console()->SetFlagMask(CFGFLAG_CHAT | CFGFLAG_SERVER);
+			pSelf->Console()->ExecuteLine(aCommand, ClientId, false);
+			pSelf->Console()->SetFlagMask(OldFlagMask);
+			return;
+		}
+	}
 	else if(str_comp(pAction, "pet_follow") == 0)
 		pCommand = "stay disable";
 	else if(str_comp(pAction, "pet_stay") == 0)
@@ -356,7 +547,7 @@ void CGameContext::ConTeeTycoonMenuInfo(IConsole::IResult *pResult, void *pUserD
 		else
 			str_copy(aBuf, "Money tile: maximum level reached.");
 		pSelf->SendChatTarget(ClientId, aBuf);
-		if(pPlayer->house < 2)
+		if(pPlayer->house < MAX_HOUSE_LEVEL)
 			str_format(aBuf, sizeof(aBuf), "Next House upgrade: $%d", 1000000 * (pPlayer->house + 2));
 		else
 			str_copy(aBuf, "House: maximum level reached.");
@@ -366,7 +557,7 @@ void CGameContext::ConTeeTycoonMenuInfo(IConsole::IResult *pResult, void *pUserD
 		else
 			str_copy(aBuf, "VIP: maximum level reached.");
 		pSelf->SendChatTarget(ClientId, aBuf);
-		str_format(aBuf, sizeof(aBuf), "Next Rebirth: $%d (requires House level 2)", 1000000 * (pPlayer->rebirth + 1));
+		str_format(aBuf, sizeof(aBuf), "Next Rebirth: $%d (requires House level 4)", 1000000 * (pPlayer->rebirth + 1));
 		pSelf->SendChatTarget(ClientId, aBuf);
 		pSelf->SendChatTarget(ClientId, "Shop prices: Pet $1000000 | Rainbow $10000 | Bloody $50000");
 	}
@@ -418,76 +609,44 @@ void CGameContext::ConTeeTycoonMenuInfo(IConsole::IResult *pResult, void *pUserD
 void CGameContext::ConJoinEvent(IConsole::IResult *pResult, void *pUserData)
 {
 	CGameContext *pSelf = (CGameContext *)pUserData;
-	CPlayer *pPlayer = pSelf->m_apPlayers[pResult->m_ClientId];
-	int eventType = 0;
+	CPlayer *pPlayer = GetPetCommandOwner(pSelf, pResult->m_ClientId);
+	if(!pPlayer)
+		return;
+	if(!pPlayer)
+		return;
 
-	if (pPlayer->id > 0)
+	if(pPlayer->id <= 0)
 	{
-		//check if the event is starting (remember to change the value to 0 when i start the event).
-		std::ifstream MyReadFile("StartingEvent.txt");
-		std::string myText;
+		pSelf->SendChatTarget(pResult->m_ClientId, "You need to log in before joining an event.");
+		return;
+	}
 
-		std::getline(MyReadFile, myText);
-		MyReadFile.close();
-		if(myText == "1")
-		{
-			if (!pPlayer->hasJoined)
-			{
-				//add pPlayer id to the joined vector (then when i start the event i will teleport all the registered players to the event area).
-				pSelf->playersJoined.push_back(pResult->m_ClientId);
-				std::ifstream EventTypeFile("EventType.txt");
-				std::getline(EventTypeFile, myText);
-				EventTypeFile.close();
-				if(myText == "1") //Survival.
-				{
-					pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "chatresp",
-						"You have been added to the survival event!");
-				}
-				else if(myText == "2") //Race.
-				{
-					pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "chatresp",
-						"You have been added to the race event!");
-				}
-				else if(myText == "3") //dm.
-				{
-					pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "chatresp",
-						"You have been added to the Deathmatch event!");
-				}
-				else if(myText == "4") //Freeze Race.
-				{
-					pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "chatresp",
-						"You have been added to the Freeze Race event!");
-				}
-				else if(myText == "5") //Race.
-				{
-					pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "chatresp",
-						"You have been added to the fng event!");
-				}
-				pPlayer->hasJoined = true;
-			}
-			else
-			{
-				pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "chatresp",
-					"You have already registered to the event!");
-			}
-		}
-		else
-		{
-			pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "chatresp",
-				"There is no event right now / its already started!");
-		}
-	}
-	else
+	std::lock_guard<std::mutex> Lock(pSelf->m_EventPlayersMutex);
+	if(pSelf->m_EventState.load() != 1)
 	{
-		pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "chatresp",
-			"You are not logged in!");
+		pSelf->SendChatTarget(pResult->m_ClientId, pSelf->m_EventState.load() == 2 ? "The event has already started; registration is closed." : "There is no event open for registration.");
+		return;
 	}
+	if(pPlayer->hasJoined)
+	{
+		pSelf->SendChatTarget(pResult->m_ClientId, "You are already registered for this event.");
+		return;
+	}
+	pSelf->playersJoined.push_back(pResult->m_ClientId);
+	pPlayer->hasJoined = true;
+	static const char *s_apEventNames[] = {"", "Survival", "Race", "Deathmatch", "Freeze Race", "FNG"};
+	const int EventType = pSelf->m_EventType.load();
+	char aMessage[128];
+	str_format(aMessage, sizeof(aMessage), "You joined the %s event. Registration closes in 30 seconds.", EventType >= 1 && EventType <= 5 ? s_apEventNames[EventType] : "current");
+	pSelf->SendChatTarget(pResult->m_ClientId, aMessage);
 }
 
 void CGameContext::ConStay(IConsole::IResult* pResult, void* pUserData)
 {
 	CGameContext *pSelf = (CGameContext *)pUserData;
-	CPlayer *pPlayer = pSelf->m_apPlayers[pResult->m_ClientId];
+	CPlayer *pPlayer = GetPetCommandOwner(pSelf, pResult->m_ClientId);
+	if(!pPlayer)
+		return;
 	std::string arg = pResult->GetString(0);
 	std::transform(arg.begin(), arg.end(), arg.begin(),
 		[](unsigned char c) { return std::tolower(c); });
@@ -521,7 +680,9 @@ void CGameContext::ConStay(IConsole::IResult* pResult, void* pUserData)
 void CGameContext::ConBuy(IConsole::IResult* pResult, void* pUserData)
 {
 	CGameContext *pSelf = (CGameContext *)pUserData;
-	CPlayer *pPlayer = pSelf->m_apPlayers[pResult->m_ClientId];
+	CPlayer *pPlayer = GetPetCommandOwner(pSelf, pResult->m_ClientId);
+	if(!pPlayer)
+		return;
 	std::string msg;
 	int currMoney = 0;
 	const char *sqlStatement;
@@ -601,7 +762,7 @@ void CGameContext::ConBuy(IConsole::IResult* pResult, void* pUserData)
 		}
 		else if(item == "house")
 		{
-			if(pPlayer->house < 2)
+			if(pPlayer->house < MAX_HOUSE_LEVEL)
 			{
 				if(pPlayer->money >= (1000000 * (pPlayer->house + 2)))
 				{
@@ -618,14 +779,14 @@ void CGameContext::ConBuy(IConsole::IResult* pResult, void* pUserData)
 					}
 					else
 					{
-						if (pResult->GetInteger(1) + pPlayer->house <= 2)
+						if (pResult->GetInteger(1) > 0 && pResult->GetInteger(1) + pPlayer->house <= MAX_HOUSE_LEVEL)
 						{
 							currMoney = pPlayer->money;
 							for(int i = 0; i < pResult->GetInteger(1); i++)
 							{
 								currMoney -= (1000000 * (pPlayer->house + 2 + i));
 							}
-							if(currMoney > 0)
+                            if(currMoney >= 0)
 							{
 								pPlayer->money = currMoney;
 								pPlayer->house += pResult->GetInteger(1);
@@ -645,7 +806,7 @@ void CGameContext::ConBuy(IConsole::IResult* pResult, void* pUserData)
 						else
 						{
 							pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "chatresp",
-								"You cant buy this amount since max house is 2!");
+								"House upgrades must be positive and cannot exceed level 4!");
 						}
 					}
 				}
@@ -658,7 +819,7 @@ void CGameContext::ConBuy(IConsole::IResult* pResult, void* pUserData)
 			else
 			{
 				pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "chatresp",
-					"Your house is already max level! (house 2)");
+					"Your house is already max level! (house 4)");
 			}
 		}
 		else if(item == "vip")
@@ -727,7 +888,7 @@ void CGameContext::ConBuy(IConsole::IResult* pResult, void* pUserData)
 		{
 			if(pPlayer->money >= (1000000 * (pPlayer->rebirth + 1)))
 			{
-				if(pPlayer->house == 2)
+				if(pPlayer->house == MAX_HOUSE_LEVEL)
 				{
 					pPlayer->money = 0;
 					pPlayer->rank = 0;
@@ -745,7 +906,7 @@ void CGameContext::ConBuy(IConsole::IResult* pResult, void* pUserData)
 				else
 				{
 					pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "chatresp",
-						"Your house has to be max level! (house 2)");
+						"Your house has to be max level! (house 4)");
 				}
 			}
 			else
@@ -890,7 +1051,9 @@ void CGameContext::ConBuy(IConsole::IResult* pResult, void* pUserData)
 void CGameContext::ConShop(IConsole::IResult* pResult, void* pUserData)
 {
 	CGameContext *pSelf = (CGameContext *)pUserData;
-	CPlayer *pPlayer = pSelf->m_apPlayers[pResult->m_ClientId];
+	CPlayer *pPlayer = GetPetCommandOwner(pSelf, pResult->m_ClientId);
+	if(!pPlayer)
+		return;
 	std::string msg;
 	if (pResult->NumArguments() > 0)
 	{
@@ -915,7 +1078,7 @@ void CGameContext::ConShop(IConsole::IResult* pResult, void* pUserData)
 		else if(item == "rebirth")
 		{
 			pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "chatresp",
-				"reset everything you had, but you get x5 more money every time you buy it! You also has to be max house(2)");
+				"reset everything you had, but you get x5 more money every time you buy it! You also have to be max house(4)");
 		}
 		else if(item == "pet")
 		{
@@ -947,13 +1110,13 @@ void CGameContext::ConShop(IConsole::IResult* pResult, void* pUserData)
 			msg = "Farm[" + std::to_string(pPlayer->rank + 1) + "] - " + std::to_string(10000 * (pPlayer->rank + 1)) + "$";
 			pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "chatresp",
 				msg.c_str());
-			msg = "House[" + std::to_string(pPlayer->house + 1) + "] - " + std::to_string(1000000 * (pPlayer->house + 2)) + "$";
+			msg = pPlayer->house < MAX_HOUSE_LEVEL ? "House[" + std::to_string(pPlayer->house + 1) + "] - " + std::to_string(1000000 * (pPlayer->house + 2)) + "$" : "House[4] - MAX";
 			pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "chatresp",
 				msg.c_str());
 			msg = "VIP[" + std::to_string(pPlayer->vip + 1) + "] - " + std::to_string(50000 * (pPlayer->vip + 1)) + "$ (limited)";
 			pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "chatresp",
 				msg.c_str());
-			msg = "Rebirth[" + std::to_string(pPlayer->rebirth + 1) + "] - " + std::to_string(1000000 * (pPlayer->rebirth + 1)) + "$ + reset all stats expect of level (has to be house 2)";
+			msg = "Rebirth[" + std::to_string(pPlayer->rebirth + 1) + "] - " + std::to_string(1000000 * (pPlayer->rebirth + 1)) + "$ + reset all stats except level (requires house 4)";
 			pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "chatresp",
 				msg.c_str());
 			msg = "pet - " + std::to_string(1000000) + "$ (until disconnect)";
@@ -1054,6 +1217,8 @@ void CGameContext::ConCommands(IConsole::IResult* pResult, void* pUserData)
 	pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "chatresp",
 		"/pet_upgrade [race|blocker|defense|helper|aim] (levels 1-10)");
 	pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "chatresp",
+		"/pet_weapon [gun|shotgun|grenade|laser|ninja] (permanent unlock)");
+	pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "chatresp",
 		"/invite [playerName] (invite player to your house (only if your'e in house)).");
 	pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "chatresp",
 		"/unrainbow (delete your rainbow).");
@@ -1064,7 +1229,9 @@ void CGameContext::ConCommands(IConsole::IResult* pResult, void* pUserData)
 void CGameContext::ConPetSpawn(IConsole::IResult* pResult, void* pUserData)
 {
 	CGameContext *pSelf = (CGameContext *)pUserData;
-	CPlayer *pPlayer = pSelf->m_apPlayers[pResult->m_ClientId];
+	CPlayer *pPlayer = GetPetCommandOwner(pSelf, pResult->m_ClientId);
+	if(!pPlayer)
+		return;
 
 	if(pPlayer->id > 0)
 	{
@@ -1250,7 +1417,9 @@ void CGameContext::ConPetProfile(IConsole::IResult *pResult, void *pUserData)
 {
 	CGameContext *pSelf = (CGameContext *)pUserData;
 	//get player info for case that the player check his own pet profile.
-	CPlayer *pPlayer = pSelf->m_apPlayers[pResult->m_ClientId];
+	CPlayer *pPlayer = GetPetCommandOwner(pSelf, pResult->m_ClientId);
+	if(!pPlayer)
+		return;
 	std::string msg;
 	bool found = false;
 	if (pResult->NumArguments() > 0) //check others pet.
@@ -1271,57 +1440,36 @@ void CGameContext::ConPetProfile(IConsole::IResult *pResult, void *pUserData)
 			return;
 		}
 	}
-	if (pPlayer->m_ownBot)
+	CPlayer *pPet = pPlayer->m_ownBot && pPlayer->botId >= 0 && pPlayer->botId < MAX_CLIENTS ? pSelf->m_apPlayers[pPlayer->botId] : nullptr;
+	if(pPet && pPet->m_IsBot)
 	{
-		msg = std::string(pSelf->Server()->ClientName(pPlayer->GetCid())) + "'s pet profile:";
-		pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "chatresp",
-			msg.c_str());
-		msg = "pet name - " + pSelf->m_apPlayers[pPlayer->botId]->username;
-		pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "chatresp",
-			msg.c_str());
-		msg = "pet level - " + std::to_string(pSelf->m_apPlayers[pPlayer->botId]->level);
-		pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "chatresp",
-			msg.c_str());
-		msg = "pet exp - [" + std::to_string(pSelf->m_apPlayers[pPlayer->botId]->exp) + "/" + std::to_string(pSelf->m_apPlayers[pPlayer->botId]->neededExp) + "]";
-		pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "chatresp",
-			msg.c_str());
-		std::string petWeapon;
-		if (pSelf->m_apPlayers[pPlayer->botId]->weaponBot == 0)
-		{
-			petWeapon = "Hammer";
-		}
-		else if (pSelf->m_apPlayers[pPlayer->botId]->weaponBot == 1)
-		{
-			petWeapon = "Gun";
-		}
-		else if(pSelf->m_apPlayers[pPlayer->botId]->weaponBot == 2)
-		{
-			petWeapon = "Shotgun";
-		}
-		else if(pSelf->m_apPlayers[pPlayer->botId]->weaponBot == 3)
-		{
-			petWeapon = "Grenade";
-		}
-		else if(pSelf->m_apPlayers[pPlayer->botId]->weaponBot == 4)
-		{
-			petWeapon = "Rifle";
-		}
-		msg = "pet weapon - " + petWeapon;
-		pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "chatresp",
-			msg.c_str());
-		msg = "pet Kills - " + std::to_string(pSelf->m_apPlayers[pPlayer->botId]->kills);
-		pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "chatresp",
-			msg.c_str());
+		msg = pPlayer->username + "'s pet profile:";
+		pSelf->SendChatTarget(pResult->m_ClientId, msg.c_str());
+		msg = "Pet name: " + pPet->username;
+		pSelf->SendChatTarget(pResult->m_ClientId, msg.c_str());
+		msg = "Pet level: " + std::to_string(pPet->level);
+		pSelf->SendChatTarget(pResult->m_ClientId, msg.c_str());
+		msg = "Pet XP: [" + std::to_string(pPet->exp) + "/" + std::to_string(pPet->neededExp) + "]";
+		pSelf->SendChatTarget(pResult->m_ClientId, msg.c_str());
+		std::string petWeapon = "Hammer";
+		const int WeaponMask = pPet->m_PetWeaponMask;
+		for(int WeaponId = WEAPON_GUN; WeaponId < NUM_WEAPONS; WeaponId++)
+			if(WeaponMask & (1 << WeaponId))
+				petWeapon += std::string(", ") + PET_WEAPON_NAMES[WeaponId];
+		msg = "Pet weapons: " + petWeapon;
+		pSelf->SendChatTarget(pResult->m_ClientId, msg.c_str());
+		msg = "Pet kills: " + std::to_string(pPet->kills);
+		pSelf->SendChatTarget(pResult->m_ClientId, msg.c_str());
 		int Total = 0;
 		for(int Skill = 0; Skill < NUM_PET_SKILLS; Skill++)
 		{
-			const int Level = PetSkillLevel(pSelf->m_apPlayers[pPlayer->botId]->m_aPetSkills[Skill]);
+			const int Level = PetSkillLevel(pPet->m_aPetSkills[Skill]);
 			Total += Level;
 			msg = std::string(PET_SKILL_NAMES[Skill]) + " skill - " + std::to_string(Level) + "/10";
-			pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "chatresp", msg.c_str());
+			pSelf->SendChatTarget(pResult->m_ClientId, msg.c_str());
 		}
 		msg = "Overall skill rating - " + std::to_string(Total) + "/50";
-		pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "chatresp", msg.c_str());
+		pSelf->SendChatTarget(pResult->m_ClientId, msg.c_str());
 	}
 	else
 	{
@@ -1329,7 +1477,7 @@ void CGameContext::ConPetProfile(IConsole::IResult *pResult, void *pUserData)
 		{
 			sqlite3_stmt *pStatement = nullptr;
 			if(sqlite3_prepare_v2(pSelf->db,
-				"SELECT NAME, LEVEL, SKILL_RACE, SKILL_BLOCKER, SKILL_DEFENSE, SKILL_HELPER, SKILL_AIM FROM BOTS WHERE OWNER_NAME = ? LIMIT 1",
+				"SELECT NAME, LEVEL, SKILL_RACE, SKILL_BLOCKER, SKILL_DEFENSE, SKILL_HELPER, SKILL_AIM, PET_WEAPONS FROM BOTS WHERE OWNER_NAME = ? LIMIT 1",
 				-1, &pStatement, nullptr) == SQLITE_OK)
 			{
 				sqlite3_bind_text(pStatement, 1, pPlayer->username.c_str(), -1, SQLITE_TRANSIENT);
@@ -1338,6 +1486,12 @@ void CGameContext::ConPetProfile(IConsole::IResult *pResult, void *pUserData)
 					const char *pName = reinterpret_cast<const char *>(sqlite3_column_text(pStatement, 0));
 					msg = pPlayer->username + "'s pet: " + (pName ? pName : "Pet") + " (Lv " + std::to_string(sqlite3_column_int(pStatement, 1)) + ", not spawned)";
 					pSelf->SendChatTarget(pResult->m_ClientId, msg.c_str());
+					std::string PetWeapons = "Owned weapons: Hammer";
+					const int WeaponMask = sqlite3_column_int(pStatement, 7);
+					for(int WeaponId = WEAPON_GUN; WeaponId < NUM_WEAPONS; WeaponId++)
+						if(WeaponMask & (1 << WeaponId))
+							PetWeapons += std::string(", ") + PET_WEAPON_NAMES[WeaponId];
+					pSelf->SendChatTarget(pResult->m_ClientId, PetWeapons.c_str());
 					int Total = 0;
 					for(int Skill = 0; Skill < NUM_PET_SKILLS; Skill++)
 					{
@@ -1438,7 +1592,7 @@ void CGameContext::ConProfile(IConsole::IResult* pResult, void* pUserData)
 		}
 		pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "chatresp",
 			msg.c_str());
-		if (pPlayer->house == 2)
+		if (pPlayer->house == MAX_HOUSE_LEVEL)
 		{
 			msg = "house: " + std::to_string(pPlayer->house) + " (Max)";
 		}
@@ -1492,7 +1646,9 @@ void CGameContext::ConPetUpgrade(IConsole::IResult *pResult, void *pUserData)
 {
 	CGameContext *pSelf = static_cast<CGameContext *>(pUserData);
 	const int ClientId = pResult->m_ClientId;
-	CPlayer *pOwner = ClientId >= 0 && ClientId < MAX_CLIENTS ? pSelf->m_apPlayers[ClientId] : nullptr;
+	CPlayer *pOwner = GetPetCommandOwner(pSelf, ClientId);
+	if(!pOwner)
+		return;
 	const int Skill = PetSkillFromKey(pResult->GetString(0));
 	if(Skill < 0)
 	{
@@ -1577,12 +1733,518 @@ void CGameContext::ConPetUpgrade(IConsole::IResult *pResult, void *pUserData)
 	pSelf->RefreshTeeTycoonVoteMenu(ClientId);
 }
 
+void CGameContext::ConPetWeapon(IConsole::IResult *pResult, void *pUserData)
+{
+	CGameContext *pSelf = static_cast<CGameContext *>(pUserData);
+	const int ClientId = pResult->m_ClientId;
+	CPlayer *pOwner = GetPetCommandOwner(pSelf, ClientId);
+	if(!pOwner)
+		return;
+	if(pOwner->id <= 0 || !pSelf->db)
+	{
+		pSelf->SendChatTarget(ClientId, "Log in before buying a pet weapon.");
+		return;
+	}
+	const char *pWeaponName = pResult->GetString(0);
+	int Weapon = -1;
+	for(int i = WEAPON_GUN; i < NUM_WEAPONS; i++)
+		if(str_comp(pWeaponName, PET_WEAPON_KEYS[i]) == 0)
+			Weapon = i;
+	if(Weapon < WEAPON_GUN || Weapon >= NUM_WEAPONS)
+	{
+		pSelf->SendChatTarget(ClientId, "Use /pet_weapon gun, shotgun, grenade, laser, or ninja.");
+		return;
+	}
+	if(sqlite3_exec(pSelf->db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr) != SQLITE_OK)
+	{
+		pSelf->SendChatTarget(ClientId, "The pet database is busy. Please try again.");
+		return;
+	}
+	sqlite3_stmt *pStatement = nullptr;
+	int Mask = 0;
+	bool Success = sqlite3_prepare_v2(pSelf->db, "SELECT PET_WEAPONS FROM BOTS WHERE OWNER_NAME = ? LIMIT 1", -1, &pStatement, nullptr) == SQLITE_OK;
+	if(Success)
+	{
+		sqlite3_bind_text(pStatement, 1, pOwner->username.c_str(), -1, SQLITE_TRANSIENT);
+		Success = sqlite3_step(pStatement) == SQLITE_ROW;
+		if(Success)
+			Mask = sqlite3_column_int(pStatement, 0);
+	}
+	sqlite3_finalize(pStatement);
+	if(!Success)
+	{
+		sqlite3_exec(pSelf->db, "ROLLBACK", nullptr, nullptr, nullptr);
+		pSelf->SendChatTarget(ClientId, "You do not own a pet, or its data is unavailable.");
+		return;
+	}
+	const int Bit = 1 << Weapon;
+	if(Mask & Bit)
+	{
+		sqlite3_exec(pSelf->db, "ROLLBACK", nullptr, nullptr, nullptr);
+		pSelf->SendChatTarget(ClientId, "Your pet already owns that weapon permanently.");
+		return;
+	}
+	const int Cost = PET_WEAPON_PRICES[Weapon];
+	Success = sqlite3_prepare_v2(pSelf->db, "UPDATE BOTS SET PET_WEAPONS = PET_WEAPONS | ? WHERE OWNER_NAME = ?", -1, &pStatement, nullptr) == SQLITE_OK;
+	if(Success)
+	{
+		sqlite3_bind_int(pStatement, 1, Bit);
+		sqlite3_bind_text(pStatement, 2, pOwner->username.c_str(), -1, SQLITE_TRANSIENT);
+		Success = sqlite3_step(pStatement) == SQLITE_DONE && sqlite3_changes(pSelf->db) == 1;
+	}
+	sqlite3_finalize(pStatement);
+	pStatement = nullptr;
+	if(Success)
+		Success = sqlite3_prepare_v2(pSelf->db, "UPDATE ACCOUNTS SET MONEY = MONEY - ? WHERE ID = ? AND MONEY >= ?", -1, &pStatement, nullptr) == SQLITE_OK;
+	if(Success)
+	{
+		sqlite3_bind_int(pStatement, 1, Cost);
+		sqlite3_bind_int(pStatement, 2, pOwner->id);
+		sqlite3_bind_int(pStatement, 3, Cost);
+		Success = sqlite3_step(pStatement) == SQLITE_DONE && sqlite3_changes(pSelf->db) == 1;
+	}
+	sqlite3_finalize(pStatement);
+	if(Success)
+		Success = sqlite3_exec(pSelf->db, "COMMIT", nullptr, nullptr, nullptr) == SQLITE_OK;
+	if(!Success)
+	{
+		sqlite3_exec(pSelf->db, "ROLLBACK", nullptr, nullptr, nullptr);
+		pSelf->SendChatTarget(ClientId, "Purchase failed. Check your balance and try again; nothing was charged.");
+		return;
+	}
+	pOwner->money -= Cost;
+	CPlayer *pPet = pOwner->m_ownBot && pOwner->botId >= 0 && pOwner->botId < MAX_CLIENTS ? pSelf->m_apPlayers[pOwner->botId] : nullptr;
+	if(pPet && pPet->m_IsBot && pPet->m_pBot)
+	{
+		pPet->m_PetWeaponMask |= Bit;
+		if(pPet->GetCharacter())
+		{
+			pPet->GetCharacter()->GiveWeapon(Weapon);
+			if(Weapon == WEAPON_NINJA)
+			{
+				const int Now = pSelf->Server()->Tick();
+				pPet->m_pBot->m_NinjaActiveUntilTick = Now + 10 * pSelf->Server()->TickSpeed();
+				pPet->m_pBot->m_NinjaCooldownUntilTick = Now + 60 * pSelf->Server()->TickSpeed();
+			}
+		}
+	}
+	const std::string Message = std::string("Your pet permanently unlocked the ") + PET_WEAPON_NAMES[Weapon] + "." + (pPet && pPet->GetCharacter() ? " It has it now." : " It will have it the next time it spawns.");
+	pSelf->SendChatTarget(ClientId, Message.c_str());
+	pSelf->RefreshTeeTycoonVoteMenu(ClientId);
+}
+
+void CGameContext::ConPetPopupEmote(IConsole::IResult *pResult, void *pUserData)
+{
+	CGameContext *pSelf = static_cast<CGameContext *>(pUserData);
+	const int ClientId = pResult->m_ClientId;
+	CPlayer *pOwner = GetPetCommandOwner(pSelf, ClientId);
+	if(!pOwner)
+		return;
+	if(pOwner->id <= 0 || !pSelf->db)
+	{
+		pSelf->SendChatTarget(ClientId, "Log in and own a pet to change its popup emoticon.");
+		return;
+	}
+	const char *pKey = pResult->GetString(0);
+	const char *pMode = pResult->GetString(1);
+	int Emote = -1;
+	int Price = 0;
+	for(size_t i = 0; i < sizeof(PET_POPUP_EMOTES) / sizeof(PET_POPUP_EMOTES[0]); i++)
+	{
+		if(str_comp(pKey, PET_POPUP_EMOTE_KEYS[i]) == 0)
+		{
+			Emote = PET_POPUP_EMOTES[i];
+			Price = PET_POPUP_EMOTE_PRICES[i];
+			break;
+		}
+	}
+	const bool Disable = str_comp(pKey, "off") == 0 && str_comp(pMode, "use") == 0;
+	const bool Buy = str_comp(pMode, "buy") == 0;
+	if((Emote < 0 && !Disable) || (Buy && Price == 0) || (!Buy && str_comp(pMode, "use") != 0))
+	{
+		pSelf->SendChatTarget(ClientId, "Choose a popup emoticon from the pet shop, then buy or activate it.");
+		return;
+	}
+	if(sqlite3_exec(pSelf->db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr) != SQLITE_OK)
+	{
+		pSelf->SendChatTarget(ClientId, "The pet database is busy. Please try again.");
+		return;
+	}
+	sqlite3_stmt *pStatement = nullptr;
+	bool Success = false;
+	if(Disable)
+	{
+		Success = sqlite3_prepare_v2(pSelf->db, "UPDATE BOTS SET PET_POPUP_EMOTE = -1 WHERE OWNER_NAME = ?", -1, &pStatement, nullptr) == SQLITE_OK;
+		if(Success)
+		{
+			sqlite3_bind_text(pStatement, 1, pOwner->username.c_str(), -1, SQLITE_TRANSIENT);
+			Success = sqlite3_step(pStatement) == SQLITE_DONE && sqlite3_changes(pSelf->db) == 1;
+		}
+	}
+	else if(Buy)
+	{
+		const int Bit = 1 << Emote;
+		Success = sqlite3_prepare_v2(pSelf->db, "UPDATE BOTS SET PET_POPUP_EMOTES = PET_POPUP_EMOTES | ?, PET_POPUP_EMOTE = ? WHERE OWNER_NAME = ? AND (PET_POPUP_EMOTES & ?) = 0", -1, &pStatement, nullptr) == SQLITE_OK;
+		if(Success)
+		{
+			sqlite3_bind_int(pStatement, 1, Bit);
+			sqlite3_bind_int(pStatement, 2, Emote);
+			sqlite3_bind_text(pStatement, 3, pOwner->username.c_str(), -1, SQLITE_TRANSIENT);
+			sqlite3_bind_int(pStatement, 4, Bit);
+			Success = sqlite3_step(pStatement) == SQLITE_DONE && sqlite3_changes(pSelf->db) == 1;
+		}
+		if(Success)
+		{
+			sqlite3_finalize(pStatement);
+			pStatement = nullptr;
+			Success = sqlite3_prepare_v2(pSelf->db, "UPDATE ACCOUNTS SET MONEY = MONEY - ? WHERE ID = ? AND MONEY >= ?", -1, &pStatement, nullptr) == SQLITE_OK;
+			if(Success)
+			{
+				sqlite3_bind_int(pStatement, 1, Price);
+				sqlite3_bind_int(pStatement, 2, pOwner->id);
+				sqlite3_bind_int(pStatement, 3, Price);
+				Success = sqlite3_step(pStatement) == SQLITE_DONE && sqlite3_changes(pSelf->db) == 1;
+			}
+		}
+	}
+	else
+	{
+		Success = sqlite3_prepare_v2(pSelf->db, "UPDATE BOTS SET PET_POPUP_EMOTE = ? WHERE OWNER_NAME = ? AND (PET_POPUP_EMOTES & ?) != 0", -1, &pStatement, nullptr) == SQLITE_OK;
+		if(Success)
+		{
+			sqlite3_bind_int(pStatement, 1, Emote);
+			sqlite3_bind_text(pStatement, 2, pOwner->username.c_str(), -1, SQLITE_TRANSIENT);
+			sqlite3_bind_int(pStatement, 3, 1 << Emote);
+			Success = sqlite3_step(pStatement) == SQLITE_DONE && sqlite3_changes(pSelf->db) == 1;
+		}
+	}
+	sqlite3_finalize(pStatement);
+	if(Success)
+		Success = sqlite3_exec(pSelf->db, "COMMIT", nullptr, nullptr, nullptr) == SQLITE_OK;
+	if(!Success)
+	{
+		sqlite3_exec(pSelf->db, "ROLLBACK", nullptr, nullptr, nullptr);
+		pSelf->SendChatTarget(ClientId, "Could not update the pet emoticon. Check ownership and balance, then try again.");
+		return;
+	}
+	if(Buy)
+		pOwner->money -= Price;
+	CPlayer *pPet = pOwner->m_ownBot && pOwner->botId >= 0 && pOwner->botId < MAX_CLIENTS ? pSelf->m_apPlayers[pOwner->botId] : nullptr;
+	if(pPet && pPet->m_IsBot)
+	{
+		if(Buy)
+			pPet->m_PetPopupEmoteMask |= 1 << Emote;
+		pPet->m_PetPopupEmote = Disable ? -1 : Emote;
+	}
+	size_t EmoteIndex = 0;
+	while(EmoteIndex < sizeof(PET_POPUP_EMOTES) / sizeof(PET_POPUP_EMOTES[0]) && PET_POPUP_EMOTES[EmoteIndex] != Emote)
+		EmoteIndex++;
+	const std::string Message = Disable ? "Your pet stopped sending popup emoticons." : Buy ?
+		std::string("Bought and activated the ") + PET_POPUP_EMOTE_NAMES[EmoteIndex] + " popup emoticon." :
+		std::string("Your pet will now send the ") + PET_POPUP_EMOTE_NAMES[EmoteIndex] + " popup emoticon.";
+	pSelf->SendChatTarget(ClientId, Message.c_str());
+	pSelf->RefreshTeeTycoonVoteMenu(ClientId);
+}
+
+void CGameContext::ConPetFacialEmote(IConsole::IResult *pResult, void *pUserData)
+{
+	CGameContext *pSelf = static_cast<CGameContext *>(pUserData);
+	const int ClientId = pResult->m_ClientId;
+	CPlayer *pOwner = GetPetCommandOwner(pSelf, ClientId);
+	if(!pOwner)
+		return;
+	if(pOwner->id <= 0 || !pSelf->db)
+	{
+		pSelf->SendChatTarget(ClientId, "Log in and own a pet to change its facial emote.");
+		return;
+	}
+	const char *pKey = pResult->GetString(0);
+	const char *pMode = pResult->GetString(1);
+	int Emote = -1;
+	int Price = 0;
+	for(size_t i = 0; i < sizeof(PET_FACIAL_EMOTES) / sizeof(PET_FACIAL_EMOTES[0]); i++)
+	{
+		if(str_comp(pKey, PET_FACIAL_EMOTE_KEYS[i]) == 0)
+		{
+			Emote = PET_FACIAL_EMOTES[i];
+			Price = PET_FACIAL_EMOTE_PRICES[i];
+			break;
+		}
+	}
+	const bool Buy = str_comp(pMode, "buy") == 0;
+	if(Emote < 0 || (Buy && Price == 0) || (!Buy && str_comp(pMode, "use") != 0))
+	{
+		pSelf->SendChatTarget(ClientId, "Choose a facial emote from the pet shop, then buy or activate it.");
+		return;
+	}
+	if(sqlite3_exec(pSelf->db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr) != SQLITE_OK)
+	{
+		pSelf->SendChatTarget(ClientId, "The pet database is busy. Please try again.");
+		return;
+	}
+	sqlite3_stmt *pStatement = nullptr;
+	const int Bit = 1 << Emote;
+	bool Success = sqlite3_prepare_v2(pSelf->db, Buy ?
+		"UPDATE BOTS SET PET_FACIAL_EMOTES = PET_FACIAL_EMOTES | ?, PET_FACIAL_EMOTE = ? WHERE OWNER_NAME = ? AND (PET_FACIAL_EMOTES & ?) = 0" :
+		"UPDATE BOTS SET PET_FACIAL_EMOTE = ? WHERE OWNER_NAME = ? AND (PET_FACIAL_EMOTES & ?) != 0", -1, &pStatement, nullptr) == SQLITE_OK;
+	if(Success)
+	{
+		if(Buy)
+		{
+			sqlite3_bind_int(pStatement, 1, Bit);
+			sqlite3_bind_int(pStatement, 2, Emote);
+			sqlite3_bind_text(pStatement, 3, pOwner->username.c_str(), -1, SQLITE_TRANSIENT);
+			sqlite3_bind_int(pStatement, 4, Bit);
+		}
+		else
+		{
+			sqlite3_bind_int(pStatement, 1, Emote);
+			sqlite3_bind_text(pStatement, 2, pOwner->username.c_str(), -1, SQLITE_TRANSIENT);
+			sqlite3_bind_int(pStatement, 3, Bit);
+		}
+		Success = sqlite3_step(pStatement) == SQLITE_DONE && sqlite3_changes(pSelf->db) == 1;
+	}
+	sqlite3_finalize(pStatement);
+	pStatement = nullptr;
+	if(Success && Buy)
+		Success = sqlite3_prepare_v2(pSelf->db, "UPDATE ACCOUNTS SET MONEY = MONEY - ? WHERE ID = ? AND MONEY >= ?", -1, &pStatement, nullptr) == SQLITE_OK;
+	if(Success && Buy)
+	{
+		sqlite3_bind_int(pStatement, 1, Price);
+		sqlite3_bind_int(pStatement, 2, pOwner->id);
+		sqlite3_bind_int(pStatement, 3, Price);
+		Success = sqlite3_step(pStatement) == SQLITE_DONE && sqlite3_changes(pSelf->db) == 1;
+	}
+	sqlite3_finalize(pStatement);
+	if(Success)
+		Success = sqlite3_exec(pSelf->db, "COMMIT", nullptr, nullptr, nullptr) == SQLITE_OK;
+	if(!Success)
+	{
+		sqlite3_exec(pSelf->db, "ROLLBACK", nullptr, nullptr, nullptr);
+		pSelf->SendChatTarget(ClientId, Buy ? "Could not buy that facial emote. It may already be owned or you may lack money." : "That facial emote is not owned yet.");
+		return;
+	}
+	if(Buy)
+		pOwner->money -= Price;
+	CPlayer *pPet = pOwner->m_ownBot && pOwner->botId >= 0 && pOwner->botId < MAX_CLIENTS ? pSelf->m_apPlayers[pOwner->botId] : nullptr;
+	if(pPet && pPet->m_IsBot && pPet->m_pBot && pPet->m_pBot->owner == ClientId)
+	{
+		if(Buy)
+			pPet->m_PetFacialEmoteMask |= Bit;
+		pPet->m_PetFacialEmote = Emote;
+		pPet->SetDefaultEmote(Emote);
+		if(pPet->GetCharacter())
+			pPet->GetCharacter()->SetEmote(Emote, -1);
+	}
+	const size_t EmoteIndex = std::find(std::begin(PET_FACIAL_EMOTES), std::end(PET_FACIAL_EMOTES), Emote) - std::begin(PET_FACIAL_EMOTES);
+	const std::string Message = std::string(Buy ? "Bought and activated the " : "Activated the ") + PET_FACIAL_EMOTE_NAMES[EmoteIndex] + " facial emote.";
+	pSelf->SendChatTarget(ClientId, Message.c_str());
+	pSelf->RefreshTeeTycoonVoteMenu(ClientId);
+}
+
+void CGameContext::ConPetRename(IConsole::IResult *pResult, void *pUserData)
+{
+	CGameContext *pSelf = static_cast<CGameContext *>(pUserData);
+	const int ClientId = pResult->m_ClientId;
+	CPlayer *pOwner = GetPetCommandOwner(pSelf, ClientId);
+	if(!pOwner)
+		return;
+	const char *pRequestedName = pResult->NumArguments() > 0 ? pResult->GetString(0) : nullptr;
+	constexpr int RenameCost = 25000;
+	if(pOwner->id <= 0 || !pSelf->db)
+	{
+		pSelf->SendChatTarget(ClientId, "Log in before renaming your pet.");
+		return;
+	}
+	if(!pRequestedName || !pRequestedName[0] || !str_utf8_check(pRequestedName))
+	{
+		pSelf->SendChatTarget(ClientId, "Enter a valid pet name using 1 to 15 UTF-8 bytes.");
+		return;
+	}
+	char aRequestedName[MAX_NAME_LENGTH];
+	str_copy(aRequestedName, str_utf8_skip_whitespaces(pRequestedName));
+	str_utf8_trim_right(aRequestedName);
+	if(!aRequestedName[0] || str_length(aRequestedName) >= MAX_NAME_LENGTH || aRequestedName[0] == '/')
+	{
+		pSelf->SendChatTarget(ClientId, "Pet names must be 1 to 15 UTF-8 bytes, nonblank, and cannot start with '/'.");
+		return;
+	}
+	CPlayer *pPet = pOwner->m_ownBot && pOwner->botId >= 0 && pOwner->botId < MAX_CLIENTS ? pSelf->m_apPlayers[pOwner->botId] : nullptr;
+	if(pPet && (!pPet->m_IsBot || !pPet->m_pBot || pPet->m_pBot->owner != ClientId))
+		pPet = nullptr;
+	if(str_comp(pOwner->username.c_str(), aRequestedName) == 0)
+	{
+		pSelf->SendChatTarget(ClientId, "Your pet name must be different from your account name.");
+		return;
+	}
+	for(int OtherId = 0; OtherId < pSelf->Server()->MaxClients(); OtherId++)
+	{
+		if(OtherId != ClientId && pSelf->Server()->ClientIngame(OtherId) &&
+			str_utf8_comp_confusable(pSelf->Server()->ClientName(OtherId), aRequestedName) == 0)
+		{
+			pSelf->SendChatTarget(ClientId, "That pet name is already used by a player. Please choose another name.");
+			return;
+		}
+	}
+	if(sqlite3_exec(pSelf->db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr) != SQLITE_OK)
+	{
+		pSelf->SendChatTarget(ClientId, "The account database is busy. Please try again.");
+		return;
+	}
+	sqlite3_stmt *pStatement = nullptr;
+	bool Success = sqlite3_prepare_v2(pSelf->db, "UPDATE BOTS SET NAME = ? WHERE OWNER_NAME = ?", -1, &pStatement, nullptr) == SQLITE_OK;
+	if(Success)
+	{
+		sqlite3_bind_text(pStatement, 1, aRequestedName, -1, SQLITE_TRANSIENT);
+		sqlite3_bind_text(pStatement, 2, pOwner->username.c_str(), -1, SQLITE_TRANSIENT);
+		Success = sqlite3_step(pStatement) == SQLITE_DONE && sqlite3_changes(pSelf->db) == 1;
+	}
+	sqlite3_finalize(pStatement);
+	pStatement = nullptr;
+	const std::string FinalName = aRequestedName;
+	if(Success)
+		Success = sqlite3_prepare_v2(pSelf->db, "UPDATE ACCOUNTS SET MONEY = MONEY - ? WHERE ID = ? AND MONEY >= ?", -1, &pStatement, nullptr) == SQLITE_OK;
+	if(Success)
+	{
+		sqlite3_bind_int(pStatement, 1, RenameCost);
+		sqlite3_bind_int(pStatement, 2, pOwner->id);
+		sqlite3_bind_int(pStatement, 3, RenameCost);
+		Success = sqlite3_step(pStatement) == SQLITE_DONE && sqlite3_changes(pSelf->db) == 1;
+	}
+	sqlite3_finalize(pStatement);
+	if(Success)
+		Success = sqlite3_exec(pSelf->db, "COMMIT", nullptr, nullptr, nullptr) == SQLITE_OK;
+	if(!Success)
+	{
+		sqlite3_exec(pSelf->db, "ROLLBACK", nullptr, nullptr, nullptr);
+		pSelf->SendChatTarget(ClientId, "Rename failed. Make sure you own a pet and have $25000; your account was not charged.");
+		return;
+	}
+	pOwner->money -= RenameCost;
+	if(pPet)
+	{
+		pPet->username = FinalName;
+		pPet->InvalidateClientInfo();
+	}
+	const std::string Message = "Pet renamed to '" + FinalName + "' for $25000.";
+	pSelf->SendChatTarget(ClientId, Message.c_str());
+	pSelf->RefreshTeeTycoonVoteMenu(ClientId);
+}
+
+static void PurchasePetAppearance(CGameContext *pSelf, CPlayer *pOwner, const CTeeInfo &Appearance)
+{
+	const int ClientId = pOwner->GetCid();
+	if(sqlite3_exec(pSelf->db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr) != SQLITE_OK)
+	{
+		pSelf->SendChatTarget(ClientId, "The account database is busy. Please try again.");
+		return;
+	}
+	const std::string Data = SerializeTeeInfo(Appearance);
+	sqlite3_stmt *pStatement = nullptr;
+	bool Success = sqlite3_prepare_v2(pSelf->db, "UPDATE BOTS SET PET_SKIN_DATA = ? WHERE OWNER_NAME = ?", -1, &pStatement, nullptr) == SQLITE_OK;
+	if(Success)
+	{
+		sqlite3_bind_text(pStatement, 1, Data.c_str(), Data.size(), SQLITE_TRANSIENT);
+		sqlite3_bind_text(pStatement, 2, pOwner->username.c_str(), -1, SQLITE_TRANSIENT);
+		Success = sqlite3_step(pStatement) == SQLITE_DONE && sqlite3_changes(pSelf->db) == 1;
+	}
+	sqlite3_finalize(pStatement);
+	pStatement = nullptr;
+	if(Success)
+		Success = sqlite3_prepare_v2(pSelf->db, "UPDATE ACCOUNTS SET MONEY = MONEY - ? WHERE ID = ? AND MONEY >= ?", -1, &pStatement, nullptr) == SQLITE_OK;
+	if(Success)
+	{
+		sqlite3_bind_int(pStatement, 1, PET_SKIN_COPY_PRICE);
+		sqlite3_bind_int(pStatement, 2, pOwner->id);
+		sqlite3_bind_int(pStatement, 3, PET_SKIN_COPY_PRICE);
+		Success = sqlite3_step(pStatement) == SQLITE_DONE && sqlite3_changes(pSelf->db) == 1;
+	}
+	sqlite3_finalize(pStatement);
+	if(Success)
+		Success = sqlite3_exec(pSelf->db, "COMMIT", nullptr, nullptr, nullptr) == SQLITE_OK;
+	if(!Success)
+	{
+		sqlite3_exec(pSelf->db, "ROLLBACK", nullptr, nullptr, nullptr);
+		pSelf->SendChatTarget(ClientId, "Skin purchase failed. Make sure you own a pet and have $50000.");
+		return;
+	}
+	pOwner->money -= PET_SKIN_COPY_PRICE;
+	CPlayer *pPet = pOwner->m_ownBot && pOwner->botId >= 0 && pOwner->botId < MAX_CLIENTS ? pSelf->m_apPlayers[pOwner->botId] : nullptr;
+	if(pPet && pPet->m_IsBot)
+		pPet->SetTeeInfos(Appearance);
+	pSelf->SendChatTarget(ClientId, "Your pet saved your current skin and colors for $50000. You can repeat this any time.");
+	pSelf->RefreshTeeTycoonVoteMenu(ClientId);
+}
+
+void CGameContext::ConPetSkinCopy(IConsole::IResult *pResult, void *pUserData)
+{
+	CGameContext *pSelf = static_cast<CGameContext *>(pUserData);
+	const int ClientId = pResult->m_ClientId;
+	CPlayer *pOwner = GetPetCommandOwner(pSelf, ClientId);
+	if(!pOwner)
+		return;
+	if(pOwner->id <= 0 || !pSelf->db)
+	{
+		pSelf->SendChatTarget(ClientId, "Log in and own a pet before copying your skin.");
+		return;
+	}
+	PurchasePetAppearance(pSelf, pOwner, pOwner->TeeInfos());
+}
+
+void CGameContext::ConPetSkinSet(IConsole::IResult *pResult, void *pUserData)
+{
+	CGameContext *pSelf = static_cast<CGameContext *>(pUserData);
+	const int ClientId = pResult->m_ClientId;
+	CPlayer *pOwner = GetPetCommandOwner(pSelf, ClientId);
+	if(!pOwner)
+		return;
+	if(pOwner->id <= 0 || !pSelf->db)
+	{
+		pSelf->SendChatTarget(ClientId, "Log in and own a pet before setting its skin.");
+		return;
+	}
+	const char *pSkin = pResult->GetString(0);
+	const char *pBodyText = pResult->GetString(1);
+	const char *pFeetText = pResult->GetString(2);
+	if(!pBodyText || !pFeetText)
+	{
+		pSelf->SendChatTarget(ClientId, "Provide both body and feet color codes.");
+		return;
+	}
+	char *pBodyEnd = nullptr;
+	char *pFeetEnd = nullptr;
+	const auto ParseColor = [](const char *pText, char **ppEnd) {
+		const bool Hex = pText[0] == '0' && (pText[1] == 'x' || pText[1] == 'X');
+		return std::strtol(pText, ppEnd, Hex ? 16 : 10);
+	};
+	const long BodyColor = ParseColor(pBodyText, &pBodyEnd);
+	const long FeetColor = ParseColor(pFeetText, &pFeetEnd);
+	bool ValidSkin = pSkin && pSkin[0] && str_length(pSkin) < MAX_SKIN_LENGTH && str_utf8_check(pSkin);
+	for(const char *pChar = pSkin; ValidSkin && *pChar; pChar++)
+		ValidSkin = (*pChar >= 'a' && *pChar <= 'z') || (*pChar >= 'A' && *pChar <= 'Z') ||
+			(*pChar >= '0' && *pChar <= '9') || *pChar == '_' || *pChar == '-';
+	if(!ValidSkin || pBodyEnd == pBodyText || !pBodyEnd || *pBodyEnd || pFeetEnd == pFeetText || !pFeetEnd || *pFeetEnd || BodyColor < 0 || BodyColor > 0xffffff || FeetColor < 0 || FeetColor > 0xffffff)
+	{
+		pSelf->SendChatTarget(ClientId, "Use a skin name of letters, numbers, _ or - (max 23 bytes), and decimal or 0x colors from 0 to 0xFFFFFF.");
+		return;
+	}
+	CTeeInfo Appearance;
+	str_copy(Appearance.m_aSkinName, pSkin);
+	Appearance.m_UseCustomColor = true;
+	Appearance.m_ColorBody = BodyColor;
+	Appearance.m_ColorFeet = FeetColor;
+	Appearance.ToSixup();
+	PurchasePetAppearance(pSelf, pOwner, Appearance);
+}
+
 void CGameContext::ConPetRelation(IConsole::IResult *pResult, void *pUserData)
 {
 	CGameContext *pSelf = static_cast<CGameContext *>(pUserData);
 	const int ClientId = pResult->m_ClientId;
-	CPlayer *pOwner = ClientId >= 0 && ClientId < MAX_CLIENTS ? pSelf->m_apPlayers[ClientId] : nullptr;
-	if(!pOwner || pOwner->id <= 0 || !pSelf->db)
+	CPlayer *pOwner = GetPetCommandOwner(pSelf, ClientId);
+	if(!pOwner)
+		return;
+	if(pOwner->id <= 0 || !pSelf->db)
 	{
 		pSelf->SendChatTarget(ClientId, "Log in before editing pet targets.");
 		return;
@@ -1644,8 +2306,10 @@ void CGameContext::ConPetRelations(IConsole::IResult *pResult, void *pUserData)
 {
 	CGameContext *pSelf = static_cast<CGameContext *>(pUserData);
 	const int ClientId = pResult->m_ClientId;
-	CPlayer *pOwner = pSelf->m_apPlayers[ClientId];
-	if(!pOwner || pOwner->id <= 0 || !pSelf->db)
+	CPlayer *pOwner = GetPetCommandOwner(pSelf, ClientId);
+	if(!pOwner)
+		return;
+	if(pOwner->id <= 0 || !pSelf->db)
 	{
 		pSelf->SendChatTarget(ClientId, "Log in to view pet targets.");
 		return;
@@ -1673,7 +2337,9 @@ void CGameContext::ConPetFreezeTimeout(IConsole::IResult *pResult, void *pUserDa
 {
 	CGameContext *pSelf = static_cast<CGameContext *>(pUserData);
 	const int ClientId = pResult->m_ClientId;
-	CPlayer *pOwner = pSelf->m_apPlayers[ClientId];
+	CPlayer *pOwner = GetPetCommandOwner(pSelf, ClientId);
+	if(!pOwner)
+		return;
 	const int Seconds = pResult->GetInteger(0);
 	if(Seconds < 0 || Seconds > 120)
 	{
@@ -2224,7 +2890,7 @@ void CGameContext::SetPetData(int id, std::string username)
 {
 	m_apPlayers[id]->petOwnerName = username;
 	sqlite3_stmt *pStatement = nullptr;
-	if(db && sqlite3_prepare_v2(db, "SELECT NAME, LEVEL, EXP, HEALTH, ARMOR, WEAPON, KILLS, SKILL_RACE, SKILL_BLOCKER, SKILL_DEFENSE, SKILL_HELPER, SKILL_AIM, FREEZE_RESPAWN_SECONDS FROM BOTS WHERE OWNER_NAME = ? LIMIT 1", -1, &pStatement, nullptr) == SQLITE_OK)
+	if(db && sqlite3_prepare_v2(db, "SELECT NAME, LEVEL, EXP, HEALTH, ARMOR, WEAPON, KILLS, SKILL_RACE, SKILL_BLOCKER, SKILL_DEFENSE, SKILL_HELPER, SKILL_AIM, FREEZE_RESPAWN_SECONDS, PET_WEAPONS, PET_POPUP_EMOTES, PET_POPUP_EMOTE, PET_SKIN_DATA, PET_FACIAL_EMOTES, PET_FACIAL_EMOTE FROM BOTS WHERE OWNER_NAME = ? LIMIT 1", -1, &pStatement, nullptr) == SQLITE_OK)
 	{
 		sqlite3_bind_text(pStatement, 1, username.c_str(), -1, SQLITE_TRANSIENT);
 		if(sqlite3_step(pStatement) == SQLITE_ROW)
@@ -2240,6 +2906,16 @@ void CGameContext::SetPetData(int id, std::string username)
 			for(int Skill = 0; Skill < NUM_PET_SKILLS; Skill++)
 				m_apPlayers[id]->m_aPetSkills[Skill] = PetSkillLevel(sqlite3_column_int(pStatement, 7 + Skill));
 			m_apPlayers[id]->m_pBot->m_FreezeRespawnSeconds = std::clamp(sqlite3_column_int(pStatement, 12), 0, 120);
+			m_apPlayers[id]->m_PetWeaponMask = sqlite3_column_int(pStatement, 13);
+			m_apPlayers[id]->m_PetPopupEmoteMask = sqlite3_column_int(pStatement, 14);
+			m_apPlayers[id]->m_PetPopupEmote = sqlite3_column_int(pStatement, 15);
+			const char *pSkinData = reinterpret_cast<const char *>(sqlite3_column_text(pStatement, 16));
+			CTeeInfo PetTeeInfo;
+			if(DeserializeTeeInfo(pSkinData, &PetTeeInfo))
+				m_apPlayers[id]->SetTeeInfos(PetTeeInfo);
+			m_apPlayers[id]->m_PetFacialEmoteMask = sqlite3_column_int(pStatement, 17);
+			m_apPlayers[id]->m_PetFacialEmote = std::clamp(sqlite3_column_int(pStatement, 18), static_cast<int>(EMOTE_NORMAL), static_cast<int>(EMOTE_BLINK));
+			m_apPlayers[id]->SetDefaultEmote(m_apPlayers[id]->m_PetFacialEmote);
 		}
 	}
 	sqlite3_finalize(pStatement);
@@ -2260,6 +2936,321 @@ void CGameContext::SetPetData(int id, std::string username)
 	}
 	sqlite3_finalize(pStatement);
 	m_apPlayers[id]->neededExp = 10000 * (m_apPlayers[id]->level + 1) * 1.5;
+}
+
+static CPlayer *AdminTargetPlayer(CGameContext *pSelf, int ClientId)
+{
+	if(ClientId < 0 || ClientId >= pSelf->Server()->MaxClients())
+		return nullptr;
+	CPlayer *pPlayer = pSelf->m_apPlayers[ClientId];
+	return pPlayer && !pPlayer->m_IsBot && pPlayer->id > 0 ? pPlayer : nullptr;
+}
+
+static bool SaveAdminAccountValue(CGameContext *pSelf, CPlayer *pPlayer, const char *pColumn, int Value)
+{
+	if(!pSelf->db || !pPlayer || !pColumn)
+		return false;
+	const std::string Sql = std::string("UPDATE ACCOUNTS SET ") + pColumn + " = ? WHERE ID = ?";
+	sqlite3_stmt *pStatement = nullptr;
+	if(sqlite3_prepare_v2(pSelf->db, Sql.c_str(), -1, &pStatement, nullptr) != SQLITE_OK)
+		return false;
+	sqlite3_bind_int(pStatement, 1, Value);
+	sqlite3_bind_int(pStatement, 2, pPlayer->id);
+	const bool Saved = sqlite3_step(pStatement) == SQLITE_DONE && sqlite3_changes(pSelf->db) == 1;
+	sqlite3_finalize(pStatement);
+	return Saved;
+}
+
+void CGameContext::ConAdminMoney(IConsole::IResult *pResult, void *pUserData)
+{
+	CGameContext *pSelf = static_cast<CGameContext *>(pUserData);
+	const int ClientId = pResult->GetInteger(0);
+	const int Amount = pResult->GetInteger(1);
+	CPlayer *pPlayer = AdminTargetPlayer(pSelf, ClientId);
+	if(!pPlayer || Amount <= 0 || Amount > 2000000000 - pPlayer->money)
+	{
+		pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "tt_admin_money", "Use a connected, logged-in player ID and a positive amount that stays within the $2,000,000,000 cap.");
+		return;
+	}
+	if(!SaveAdminAccountValue(pSelf, pPlayer, "MONEY", pPlayer->money + Amount))
+	{
+		pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "tt_admin_money", "Could not save the money change to the account database.");
+		return;
+	}
+	pPlayer->money += Amount;
+	char aBuf[192];
+	str_format(aBuf, sizeof(aBuf), "Added $%d to client %d (%s). Balance: $%d.", Amount, ClientId, pSelf->Server()->ClientName(ClientId), pPlayer->money);
+	pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "tt_admin_money", aBuf);
+	pSelf->SendChatTarget(ClientId, aBuf);
+}
+
+void CGameContext::ConAdminLevels(IConsole::IResult *pResult, void *pUserData)
+{
+	CGameContext *pSelf = static_cast<CGameContext *>(pUserData);
+	const int ClientId = pResult->GetInteger(0);
+	const int Amount = pResult->GetInteger(1);
+	CPlayer *pPlayer = AdminTargetPlayer(pSelf, ClientId);
+	if(!pPlayer || Amount <= 0 || Amount > 100000 - pPlayer->level)
+	{
+		pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "tt_admin_levels", "Use a connected, logged-in player ID and a positive amount (maximum player level is 100000).");
+		return;
+	}
+	if(!SaveAdminAccountValue(pSelf, pPlayer, "LEVEL", pPlayer->level + Amount))
+	{
+		pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "tt_admin_levels", "Could not save the level change to the account database.");
+		return;
+	}
+	pPlayer->level += Amount;
+	pPlayer->neededExp = static_cast<int>(10000.0 * (pPlayer->level + 1) * 1.5);
+	char aBuf[192];
+	str_format(aBuf, sizeof(aBuf), "Added %d levels to client %d (%s). Level: %d.", Amount, ClientId, pSelf->Server()->ClientName(ClientId), pPlayer->level);
+	pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "tt_admin_levels", aBuf);
+	pSelf->SendChatTarget(ClientId, aBuf);
+}
+
+void CGameContext::ConAdminUpgrade(IConsole::IResult *pResult, void *pUserData)
+{
+	CGameContext *pSelf = static_cast<CGameContext *>(pUserData);
+	const int ClientId = pResult->GetInteger(0);
+	const std::string Upgrade = pResult->GetString(1);
+	const int Amount = pResult->GetInteger(2);
+	CPlayer *pPlayer = AdminTargetPlayer(pSelf, ClientId);
+	if(!pPlayer || Amount <= 0)
+	{
+		pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "tt_admin_upgrade", "Use: tt_admin_upgrade <logged-in client ID> <farm|house|vip|rebirth|pet_race|pet_blocker|pet_defense|pet_helper|pet_aim> <positive amount>.");
+		return;
+	}
+	const char *pColumn = nullptr;
+	int *pCurrent = nullptr;
+	int Maximum = 0;
+	if(Upgrade == "farm" || Upgrade == "moneytile")
+		pColumn = "RANK", pCurrent = &pPlayer->rank, Maximum = 100;
+	else if(Upgrade == "house")
+		pColumn = "HOUSE", pCurrent = &pPlayer->house, Maximum = MAX_HOUSE_LEVEL;
+	else if(Upgrade == "vip")
+		pColumn = "VIP", pCurrent = &pPlayer->vip, Maximum = 5;
+	else if(Upgrade == "rebirth")
+		pColumn = "REBIRTH", pCurrent = &pPlayer->rebirth, Maximum = 100000;
+	if(pColumn)
+	{
+		if(Amount > Maximum - *pCurrent || !SaveAdminAccountValue(pSelf, pPlayer, pColumn, *pCurrent + Amount))
+		{
+			pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "tt_admin_upgrade", "That upgrade amount exceeds its maximum or could not be saved.");
+			return;
+		}
+		*pCurrent += Amount;
+	}
+	else
+	{
+		int Skill = -1;
+		for(int i = 0; i < NUM_PET_SKILLS; i++)
+			if(Upgrade == std::string("pet_") + PET_SKILL_KEYS[i])
+				Skill = i;
+		if(Skill < 0 || !pSelf->db)
+		{
+			pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "tt_admin_upgrade", "Unknown upgrade, unavailable account database, or no pet skill selected.");
+			return;
+		}
+		const std::string Sql = std::string("UPDATE BOTS SET ") + PET_SKILL_COLUMNS[Skill] + " = MIN(" + PET_SKILL_COLUMNS[Skill] + " + ?, ?) WHERE OWNER_NAME = ?";
+		sqlite3_stmt *pStatement = nullptr;
+		if(sqlite3_prepare_v2(pSelf->db, Sql.c_str(), -1, &pStatement, nullptr) != SQLITE_OK)
+		{
+			pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "tt_admin_upgrade", "Could not prepare the pet skill update.");
+			return;
+		}
+		sqlite3_bind_int(pStatement, 1, Amount);
+		sqlite3_bind_int(pStatement, 2, PET_SKILL_MAX_LEVEL);
+		sqlite3_bind_text(pStatement, 3, pPlayer->username.c_str(), -1, SQLITE_TRANSIENT);
+		const bool Saved = sqlite3_step(pStatement) == SQLITE_DONE && sqlite3_changes(pSelf->db) == 1;
+		sqlite3_finalize(pStatement);
+		if(!Saved)
+		{
+			pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "tt_admin_upgrade", "No pet exists for that account, or the skill update failed.");
+			return;
+		}
+		if(pPlayer->botId >= 0 && pPlayer->botId < MAX_CLIENTS && pSelf->m_apPlayers[pPlayer->botId])
+		{
+			int &Level = pSelf->m_apPlayers[pPlayer->botId]->m_aPetSkills[Skill];
+			Level = PetSkillLevel(Amount >= PET_SKILL_MAX_LEVEL - Level ? PET_SKILL_MAX_LEVEL : Level + Amount);
+		}
+		pSelf->SendChatTarget(ClientId, "Your pet's skill upgrade has been applied immediately.");
+	}
+	char aBuf[192];
+	str_format(aBuf, sizeof(aBuf), "Added %d %s upgrade level(s) to client %d (%s).", Amount, Upgrade.c_str(), ClientId, pSelf->Server()->ClientName(ClientId));
+	pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "tt_admin_upgrade", aBuf);
+	if(pColumn)
+		pSelf->SendChatTarget(ClientId, aBuf);
+}
+
+void CGameContext::ConAdminCosmetic(IConsole::IResult *pResult, void *pUserData)
+{
+	CGameContext *pSelf = static_cast<CGameContext *>(pUserData);
+	const int ClientId = pResult->GetInteger(0);
+	const std::string Cosmetic = pResult->GetString(1);
+	const std::string Action = pResult->GetString(2);
+	CPlayer *pPlayer = ClientId >= 0 && ClientId < pSelf->Server()->MaxClients() ? pSelf->m_apPlayers[ClientId] : nullptr;
+	const bool Enable = Action == "on";
+	if(!pPlayer || pPlayer->m_IsBot || (Action != "on" && Action != "off"))
+	{
+		pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "tt_admin_cosmetic", "Use: tt_admin_cosmetic <logged-in client ID> <rainbow|bw_rainbow|bloody|fastweapons> <on|off>.");
+		return;
+	}
+	if(Cosmetic == "rainbow" || Cosmetic == "bw_rainbow")
+	{
+		if(Enable)
+		{
+			if(pPlayer->m_Rainbow == RAINBOW_NONE)
+			{
+				pPlayer->m_LastBodyR = pPlayer->TeeInfos().m_ColorBody;
+				pPlayer->m_LastFeetR = pPlayer->TeeInfos().m_ColorFeet;
+			}
+			pPlayer->m_Rainbow = Cosmetic == "rainbow" ? RAINBOW_COLOR : RAINBOW_BLACKWHITE;
+		}
+		else
+		{
+			pPlayer->m_Rainbow = RAINBOW_NONE;
+			pPlayer->TeeInfos().m_ColorBody = pPlayer->m_LastBodyR;
+			pPlayer->TeeInfos().m_ColorFeet = pPlayer->m_LastFeetR;
+		}
+	}
+	else if(Cosmetic == "bloody" || Cosmetic == "fastweapons")
+	{
+		CCharacter *pChr = pPlayer->GetCharacter();
+		if(!pChr)
+		{
+			pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "tt_admin_cosmetic", "That effect needs the player to be alive; spawn them and retry.");
+			return;
+		}
+		if(Cosmetic == "bloody")
+			pChr->m_Bloody_item = Enable;
+		else
+		{
+			pChr->m_FastReload = Enable;
+			pChr->m_ReloadMultiplier = Enable ? 10000 : 1000;
+			pChr->m_DDRaceState = ERaceState::CHEATED;
+		}
+	}
+	else
+	{
+		pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "tt_admin_cosmetic", "Unknown cosmetic. Choose rainbow, bw_rainbow, bloody, or fastweapons.");
+		return;
+	}
+	char aBuf[192];
+	const char *pAdminName = pResult->m_ClientId >= 0 && pResult->m_ClientId < pSelf->Server()->MaxClients() ? pSelf->Server()->ClientName(pResult->m_ClientId) : "RCON admin";
+	str_format(aBuf, sizeof(aBuf), "%s turned %s %s for client %d (%s).", pAdminName, Enable ? "on" : "off", Cosmetic.c_str(), ClientId, pSelf->Server()->ClientName(ClientId));
+	pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "tt_admin_cosmetic", aBuf);
+	pSelf->SendChatTarget(ClientId, aBuf);
+}
+
+void CGameContext::ConAdminTeleport(IConsole::IResult *pResult, void *pUserData)
+{
+	CGameContext *pSelf = static_cast<CGameContext *>(pUserData);
+	const int SourceId = pResult->GetInteger(0);
+	const int TargetId = pResult->GetInteger(1);
+	if(SourceId < 0 || SourceId >= MAX_CLIENTS || TargetId < 0 || TargetId >= MAX_CLIENTS)
+	{
+		pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "tt_admin_teleport", "Both IDs must be connected players with active characters.");
+		return;
+	}
+	CCharacter *pSource = pSelf->GetPlayerChar(SourceId);
+	CCharacter *pTarget = pSelf->GetPlayerChar(TargetId);
+	if(!pSource || !pTarget)
+	{
+		pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "tt_admin_teleport", "Both IDs must be connected players with active characters.");
+		return;
+	}
+	pSelf->Teleport(pSource, pTarget->m_Pos, true);
+	pSource->ResetJumps();
+	pSource->Unfreeze();
+	pSource->SetVelocity(vec2(0, 0));
+	char aBuf[160];
+	str_format(aBuf, sizeof(aBuf), "Teleported client %d (%s) to client %d (%s).", SourceId, pSelf->Server()->ClientName(SourceId), TargetId, pSelf->Server()->ClientName(TargetId));
+	pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "tt_admin_teleport", aBuf);
+}
+
+void CGameContext::ConAdminTeleportAll(IConsole::IResult *pResult, void *pUserData)
+{
+	CGameContext *pSelf = static_cast<CGameContext *>(pUserData);
+	const int TargetId = pResult->GetInteger(0);
+	if(TargetId < 0 || TargetId >= MAX_CLIENTS ||
+		!pSelf->m_apPlayers[TargetId] || !pSelf->GetPlayerChar(TargetId))
+	{
+		pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "tt_admin_teleport_all", "Target ID must be a connected player or bot with an active character.");
+		return;
+	}
+	const vec2 Destination = pSelf->GetPlayerChar(TargetId)->m_Pos;
+	int Teleported = 0;
+	for(int ClientId = 0; ClientId < MAX_CLIENTS; ClientId++)
+	{
+		CPlayer *pPlayer = pSelf->m_apPlayers[ClientId];
+		CCharacter *pCharacter = pSelf->GetPlayerChar(ClientId);
+		if(!pPlayer || !pCharacter)
+			continue;
+		pSelf->Teleport(pCharacter, Destination, true);
+		pCharacter->ResetJumps();
+		pCharacter->Unfreeze();
+		pCharacter->ResetVelocity();
+		Teleported++;
+	}
+	char aBuf[160];
+	str_format(aBuf, sizeof(aBuf), "Teleported %d player(s) and bot(s) to client %d (%s).", Teleported, TargetId, pSelf->Server()->ClientName(TargetId));
+	pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "tt_admin_teleport_all", aBuf);
+}
+
+void CGameContext::ConAdminTeleportAllXY(IConsole::IResult *pResult, void *pUserData)
+{
+	CGameContext *pSelf = static_cast<CGameContext *>(pUserData);
+	float X = 0.0f;
+	float Y = 0.0f;
+	const char *pXArg = pResult->GetString(0);
+	const char *pYArg = pResult->GetString(1);
+	const bool RelativeX = str_startswith(pXArg, "~");
+	const bool RelativeY = str_startswith(pYArg, "~");
+	const char *pXValue = RelativeX ? pXArg + 1 : pXArg;
+	const char *pYValue = RelativeY ? pYArg + 1 : pYArg;
+	const bool ValidX = !pXValue[0] ? RelativeX : str_tofloat(pXValue, &X);
+	const bool ValidY = !pYValue[0] ? RelativeY : str_tofloat(pYValue, &Y);
+	if(!ValidX || !ValidY || !std::isfinite(X) || !std::isfinite(Y))
+	{
+		pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "tt_admin_teleport_all_xy", "Use tile coordinates: tt_admin_teleport_all_xy <x> <y>. Prefix an axis with ~ to offset each player's current position.");
+		return;
+	}
+	CMapItemLayerTilemap *pGameLayer = pSelf->m_Layers.GameLayer();
+	if(!pGameLayer)
+	{
+		pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "tt_admin_teleport_all_xy", "The map has no game layer, so the destination cannot be checked.");
+		return;
+	}
+	constexpr float OuterKillTileBoundaryDistance = 201.0f * 32.0f;
+	const float MapWidth = pGameLayer->m_Width * 32.0f + OuterKillTileBoundaryDistance * 2.0f;
+	const float MapHeight = pGameLayer->m_Height * 32.0f + OuterKillTileBoundaryDistance * 2.0f;
+	const float AbsoluteX = X * 32.0f;
+	const float AbsoluteY = Y * 32.0f;
+	const float OffsetX = X * 32.0f;
+	const float OffsetY = Y * 32.0f;
+	int Teleported = 0;
+	for(int ClientId = 0; ClientId < MAX_CLIENTS; ClientId++)
+	{
+		CPlayer *pPlayer = pSelf->m_apPlayers[ClientId];
+		CCharacter *pCharacter = pSelf->GetPlayerChar(ClientId);
+		if(!pPlayer || !pCharacter)
+			continue;
+		const vec2 CurrentPos = pCharacter->m_Pos;
+		const float DestX = RelativeX ? CurrentPos.x + OffsetX : AbsoluteX;
+		const float DestY = RelativeY ? CurrentPos.y + OffsetY : AbsoluteY;
+		const vec2 Destination(
+			std::clamp(DestX, -OuterKillTileBoundaryDistance + 1.0f, -OuterKillTileBoundaryDistance + MapWidth - 1.0f),
+			std::clamp(DestY, -OuterKillTileBoundaryDistance + 1.0f, -OuterKillTileBoundaryDistance + MapHeight - 1.0f));
+		pSelf->Teleport(pCharacter, Destination, true);
+		pCharacter->ResetJumps();
+		pCharacter->Unfreeze();
+		pCharacter->ResetVelocity();
+		Teleported++;
+	}
+	char aBuf[192];
+	str_format(aBuf, sizeof(aBuf), "Teleported %d player(s) and bot(s) to %s%.2f, %s%.2f tiles.", Teleported,
+		RelativeX ? "~" : "", X, RelativeY ? "~" : "", Y);
+	pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "tt_admin_teleport_all_xy", aBuf);
 }
 
 int CGameContext::FindFreeBotId(bool Virtual) const
@@ -2297,19 +3288,76 @@ bool CGameContext::AddBot(int i, int ownerid, bool UseDropPlayer, bool Virtual)
 	if(!UseDropPlayer || !m_apPlayers[i])
 		m_apPlayers[i] = new(i) CPlayer(this, (uint32_t)i, i, StartTeam);
 	m_apPlayers[i]->m_IsBot = true;
+	m_apPlayers[i]->m_IsVirtualBot = Virtual;
+	m_apPlayers[i]->SetInitialAfk(false);
 	m_apPlayers[i]->m_IsBlocker = ownerid < 0;
+	if(m_apPlayers[i]->m_IsBlocker)
+		m_apPlayers[i]->SetDefaultEmote(EMOTE_ANGRY);
+	else
+		m_apPlayers[i]->SetDefaultEmote(EMOTE_NORMAL);
+	if(m_apPlayers[i]->m_IsBlocker && !Virtual)
+	{
+		static constexpr int aCountryCodes[] = {840, 276, 826, 250, 724, 380, 392, 156, 36, 124, 76, 356, 616, 642, 484, 376, 792, 578, 752, 246, 208, 528, 56, 40, 756, 203, 300, 702, 710};
+		m_apPlayers[i]->m_BotDisplayLatency = 18 + m_World.m_Core.RandomOr0(163);
+		const int Country = aCountryCodes[m_World.m_Core.RandomOr0(sizeof(aCountryCodes) / sizeof(aCountryCodes[0]))];
+		Server()->SetClientCountry(i, Country);
+	}
 	m_apPlayers[i]->m_pBot = new CBot(m_pBotEngine, m_apPlayers[i], ownerid);
 	if(ownerid >= 0)
 		SetPetData(i, m_apPlayers[ownerid]->username);
 	else
 	{
-		m_apPlayers[i]->username = "Blocker";
+		static const char *const s_apBlockerNames[] = {
+			"Big Yahu", "Epstein", "Charlie Kirk", "Putin", "Triple T", "Skibidi",
+			"Fanum Tax", "John Pork", "Quandale Dingle", "Ohio Final Boss", "The Rizzler",
+			"Sigma Tee", "Grimace Shake", "Baby Gronk", "Duke Dennis", "Kai Cenat",
+			"Sussy Baka", "Mewing Lord", "Bing Chilling", "Gyatt Goblin", "Toilet CEO",
+			"Big Chungus", "Tax Evasion", "Rizz Khan", "Giga Chad", "NPC Prime",
+			"Skibidi Putin", "Unc Behavior", "Lord Farquaad", "Chicken Jockey", "Aura Farmer",
+		};
+		constexpr int NumNames = sizeof(s_apBlockerNames) / sizeof(s_apBlockerNames[0]);
+		const int StartName = m_World.m_Core.RandomOr0(NumNames);
+		const char *pBlockerName = s_apBlockerNames[StartName];
+		for(int Offset = 0; Offset < NumNames; Offset++)
+		{
+			const char *pCandidate = s_apBlockerNames[(StartName + Offset) % NumNames];
+			bool NameInUse = false;
+			for(int OtherId = 0; OtherId < MAX_CLIENTS; OtherId++)
+			{
+				if(m_apPlayers[OtherId] && m_apPlayers[OtherId]->m_IsBlocker &&
+					str_comp(Server()->ClientName(OtherId), pCandidate) == 0)
+				{
+					NameInUse = true;
+					break;
+				}
+			}
+			if(!NameInUse)
+			{
+				pBlockerName = pCandidate;
+				break;
+			}
+		}
+		m_apPlayers[i]->username = pBlockerName;
 		m_apPlayers[i]->level = 0;
 		m_apPlayers[i]->neededExp = 15000;
 		m_apPlayers[i]->health = 10;
 		m_apPlayers[i]->armor = 10;
 	}
 	Server()->SetClientName(i, m_apPlayers[i]->username.c_str());
+	if(m_apPlayers[i]->m_IsBlocker)
+	{
+		static const char *const s_apBlockerSkins[] = {
+			"bluekitty", "bluestripe", "brownbear", "cammo", "cammostripes", "coala",
+			"default", "limekitty", "pinky", "redbopp", "redstripe", "saddo",
+			"toptri", "twinbop", "twintri", "warpaint", "x_ninja",
+		};
+		constexpr int NumSkins = sizeof(s_apBlockerSkins) / sizeof(s_apBlockerSkins[0]);
+		const int SkinIndex = (i * 7) % NumSkins;
+		const float Hue = (i * 53 % 131) / 131.0f;
+		const int BodyColor = static_cast<int>(ColorHSLA(Hue, 0.9f, 0.62f).Pack(ColorHSLA::DARKEST_LGT));
+		const int FeetColor = static_cast<int>(ColorHSLA(Hue, 0.95f, 0.42f).Pack(ColorHSLA::DARKEST_LGT));
+		m_apPlayers[i]->SetTeeInfos(s_apBlockerSkins[SkinIndex], true, BodyColor, FeetColor);
+	}
 	std::string lvlMsg = ownerid < 0 ? (Virtual ? "Blocker virtual" : "Blocker slot") : "Lv[" + std::to_string(m_apPlayers[i]->level) + "]";
 	Server()->SetClientClan(i, lvlMsg.c_str());
 	return true;
@@ -2318,28 +3366,44 @@ bool CGameContext::AddBot(int i, int ownerid, bool UseDropPlayer, bool Virtual)
 void CGameContext::ConBlockerSlot(IConsole::IResult *pResult, void *pUserData)
 {
 	CGameContext *pSelf = static_cast<CGameContext *>(pUserData);
-	const int BotId = pSelf->FindFreeBotId(false);
-	if(BotId < 0 || !pSelf->AddBot(BotId, -1, false, false))
+	const int Requested = pResult->NumArguments() > 0 ? pResult->GetInteger(0) : 1;
+	if(Requested < 1 || Requested > 32)
 	{
-		pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "blocker", "No free connection slot is available for a slot-backed blocker.");
+		pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "blocker", "Choose a blocker amount from 1 to 32.");
 		return;
 	}
-	char aBuf[128];
-	str_format(aBuf, sizeof(aBuf), "Spawned slot-backed blocker at ID %d.", BotId);
+	int Spawned = 0;
+	for(int i = 0; i < Requested; i++)
+	{
+		const int BotId = pSelf->FindFreeBotId(false);
+		if(BotId < 0 || !pSelf->AddBot(BotId, -1, false, false))
+			break;
+		Spawned++;
+	}
+	char aBuf[160];
+	str_format(aBuf, sizeof(aBuf), "Spawned %d/%d slot-backed blocker(s).", Spawned, Requested);
 	pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "blocker", aBuf);
 }
 
 void CGameContext::ConBlockerVirtual(IConsole::IResult *pResult, void *pUserData)
 {
 	CGameContext *pSelf = static_cast<CGameContext *>(pUserData);
-	const int BotId = pSelf->FindFreeBotId(true);
-	if(BotId < 0 || !pSelf->AddBot(BotId, -1, false, true))
+	const int Requested = pResult->NumArguments() > 0 ? pResult->GetInteger(0) : 1;
+	if(Requested < 1 || Requested > 32)
 	{
-		pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "blocker", "No free internal ID is available for a virtual blocker.");
+		pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "blocker", "Choose a blocker amount from 1 to 32.");
 		return;
 	}
-	char aBuf[128];
-	str_format(aBuf, sizeof(aBuf), "Spawned virtual blocker at internal ID %d.", BotId);
+	int Spawned = 0;
+	for(int i = 0; i < Requested; i++)
+	{
+		const int BotId = pSelf->FindFreeBotId(true);
+		if(BotId < 0 || !pSelf->AddBot(BotId, -1, false, true))
+			break;
+		Spawned++;
+	}
+	char aBuf[160];
+	str_format(aBuf, sizeof(aBuf), "Spawned %d/%d virtual blocker(s).", Spawned, Requested);
 	pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "blocker", aBuf);
 }
 
@@ -2354,6 +3418,22 @@ void CGameContext::ConBlockerRemove(IConsole::IResult *pResult, void *pUserData)
 	}
 	pSelf->DeleteBot(BotId);
 	pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "blocker", "Blocker removed.");
+}
+
+void CGameContext::ConBlockerRemoveAll(IConsole::IResult *pResult, void *pUserData)
+{
+	CGameContext *pSelf = static_cast<CGameContext *>(pUserData);
+	int Removed = 0;
+	for(int i = 0; i < MAX_CLIENTS; i++)
+	{
+		if(!pSelf->m_apPlayers[i] || !pSelf->m_apPlayers[i]->m_IsBlocker)
+			continue;
+		pSelf->DeleteBot(i);
+		Removed++;
+	}
+	char aBuf[96];
+	str_format(aBuf, sizeof(aBuf), "Removed %d blocker bot(s).", Removed);
+	pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "blocker", aBuf);
 }
 
 void CGameContext::ConBlockerList(IConsole::IResult *pResult, void *pUserData)

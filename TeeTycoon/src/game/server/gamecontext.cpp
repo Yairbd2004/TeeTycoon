@@ -142,7 +142,6 @@ CGameContext::CGameContext(bool Resetting) :
 
 	m_aDeleteTempfile[0] = 0;
 	m_TeeHistorianActive = false;
-	created = false;
 	m_pBotEngine = new CBotEngine(this);
 }
 
@@ -1248,6 +1247,7 @@ void CGameContext::OnTick()
 	// copy tuning
 	*m_World.GetTuning(0) = m_aTuningList[0];
 	m_World.Tick();
+	TickEvents();
 	m_PlayerMapping.Tick();
 
 	m_pController->Tick();
@@ -3018,43 +3018,15 @@ void CGameContext::OnEmoticonNetMessage(const CNetMsg_Cl_Emoticon *pMsg, int Cli
 		return;
 
 	CPlayer *pPlayer = m_apPlayers[ClientId];
-
-	auto &&CheckPreventEmote = [&](int64_t LastEmote, int64_t DelayInMs) {
-		return (LastEmote * (int64_t)1000) + (int64_t)Server()->TickSpeed() * DelayInMs > ((int64_t)Server()->Tick() * (int64_t)1000);
-	};
-
-	if(g_Config.m_SvSpamprotection && CheckPreventEmote((int64_t)pPlayer->m_LastEmote, (int64_t)g_Config.m_SvEmoticonMsDelay))
-		return;
-
 	CCharacter *pChr = pPlayer->GetCharacter();
 
-	// player needs a character to send emotes
-	if(!pChr)
-		return;
+	// The normal emoticon spam protection controls overhead emoticons. Eye
+	// emotes have their own cooldown and should still react when that protection
+	// suppresses the overhead icon.
+	auto &&UpdateEyeEmote = [&]() {
+		if(g_Config.m_SvEmotionalTees != 1 || !pPlayer->m_EyeEmoteEnabled || !pChr)
+			return;
 
-	pPlayer->m_LastEmote = Server()->Tick();
-	pPlayer->UpdatePlaytime();
-
-	// check if the global emoticon is prevented and emotes are only send to nearby players
-	if(g_Config.m_SvSpamprotection && CheckPreventEmote((int64_t)pPlayer->m_LastEmoteGlobal, (int64_t)g_Config.m_SvGlobalEmoticonMsDelay))
-	{
-		for(int i = 0; i < MAX_CLIENTS; ++i)
-		{
-			if(m_apPlayers[i] && pChr->CanSnapCharacter(i) && pChr->IsSnappingCharacterInView(i))
-			{
-				SendEmoticon(ClientId, pMsg->m_Emoticon, i);
-			}
-		}
-	}
-	else
-	{
-		// else send emoticons to all players
-		pPlayer->m_LastEmoteGlobal = Server()->Tick();
-		SendEmoticon(ClientId, pMsg->m_Emoticon, -1);
-	}
-
-	if(g_Config.m_SvEmotionalTees == 1 && pPlayer->m_EyeEmoteEnabled)
-	{
 		int EmoteType = EMOTE_NORMAL;
 		switch(pMsg->m_Emoticon)
 		{
@@ -3087,8 +3059,50 @@ void CGameContext::OnEmoticonNetMessage(const CNetMsg_Cl_Emoticon *pMsg, int Cli
 		default:
 			break;
 		}
-		pChr->SetEmote(EmoteType, Server()->Tick() + 2 * Server()->TickSpeed());
+
+		if(EmoteType != EMOTE_NORMAL && pPlayer->CanOverrideDefaultEmote())
+		{
+			pChr->SetEmote(EmoteType, Server()->Tick() + 2 * Server()->TickSpeed());
+			pPlayer->m_LastEyeEmote = Server()->Tick();
+		}
+	};
+
+	auto &&CheckPreventEmote = [&](int64_t LastEmote, int64_t DelayInMs) {
+		return (LastEmote * (int64_t)1000) + (int64_t)Server()->TickSpeed() * DelayInMs > ((int64_t)Server()->Tick() * (int64_t)1000);
+	};
+
+	if(g_Config.m_SvSpamprotection && CheckPreventEmote((int64_t)pPlayer->m_LastEmote, (int64_t)g_Config.m_SvEmoticonMsDelay))
+	{
+		UpdateEyeEmote();
+		return;
 	}
+
+	// player needs a character to send emotes
+	if(!pChr)
+		return;
+
+	pPlayer->m_LastEmote = Server()->Tick();
+	pPlayer->UpdatePlaytime();
+
+	// check if the global emoticon is prevented and emotes are only send to nearby players
+	if(g_Config.m_SvSpamprotection && CheckPreventEmote((int64_t)pPlayer->m_LastEmoteGlobal, (int64_t)g_Config.m_SvGlobalEmoticonMsDelay))
+	{
+		for(int i = 0; i < MAX_CLIENTS; ++i)
+		{
+			if(m_apPlayers[i] && pChr->CanSnapCharacter(i) && pChr->IsSnappingCharacterInView(i))
+			{
+				SendEmoticon(ClientId, pMsg->m_Emoticon, i);
+			}
+		}
+	}
+	else
+	{
+		// else send emoticons to all players
+		pPlayer->m_LastEmoteGlobal = Server()->Tick();
+		SendEmoticon(ClientId, pMsg->m_Emoticon, -1);
+	}
+
+	UpdateEyeEmote();
 }
 
 void CGameContext::OnKillNetMessage(const CNetMsg_Cl_Kill *pMsg, int ClientId)
@@ -4052,16 +4066,24 @@ void CGameContext::RegisterDDRaceCommands()
 	Console()->Register("tt_start_event_dm", "", CFGFLAG_SERVER, ConStartEventDm, this, "Start a TeeTycoon deathmatch event");
 	Console()->Register("tt_start_event_freezerace", "", CFGFLAG_SERVER, ConStartEventFreezeRace, this, "Start a TeeTycoon freeze-race event");
 	Console()->Register("tt_start_event_fng", "", CFGFLAG_SERVER, ConStartEventFng, this, "Start a TeeTycoon FNG event");
-	Console()->Register("tt_blocker_slot", "", CFGFLAG_SERVER, ConBlockerSlot, this, "Spawn a blocker that counts as a server client");
-	Console()->Register("tt_blocker_virtual", "", CFGFLAG_SERVER, ConBlockerVirtual, this, "Spawn a blocker without using a connection slot");
+	Console()->Register("tt_blocker_slot", "?i[count]", CFGFLAG_SERVER, ConBlockerSlot, this, "Spawn one or more slot-backed blockers (maximum 32 per command)");
+	Console()->Register("tt_blocker_virtual", "?i[count]", CFGFLAG_SERVER, ConBlockerVirtual, this, "Spawn one or more virtual blockers (maximum 32 per command)");
 	Console()->Register("tt_blocker_remove", "i[id]", CFGFLAG_SERVER, ConBlockerRemove, this, "Remove a blocker by internal ID");
+	Console()->Register("tt_blocker_remove_all", "", CFGFLAG_SERVER, ConBlockerRemoveAll, this, "Remove all active blocker bots");
 	Console()->Register("tt_blocker_list", "", CFGFLAG_SERVER, ConBlockerList, this, "List active blockers and their modes");
 	Console()->Register("tt_blocker_whitelist", "i[id] s[add|remove|list] ?s[in-game name]", CFGFLAG_SERVER, ConBlockerWhitelist, this, "Manage one blocker's protected in-game names");
 	Console()->Register("tt_blocker_freeze_timeout", "i[id] i[seconds]", CFGFLAG_SERVER, ConBlockerFreezeTimeout, this, "Set a blocker's frozen respawn time (0 disables)");
+	Console()->Register("tt_admin_money", "i[client_id] i[amount]", CFGFLAG_SERVER, ConAdminMoney, this, "Add money to a logged-in player by server client ID");
+	Console()->Register("tt_admin_levels", "i[client_id] i[amount]", CFGFLAG_SERVER, ConAdminLevels, this, "Add player levels to a logged-in player by server client ID");
+	Console()->Register("tt_admin_upgrade", "i[client_id] s[upgrade] i[amount]", CFGFLAG_SERVER, ConAdminUpgrade, this, "Add upgrade levels: farm, house, vip, rebirth, pet_race, pet_blocker, pet_defense, pet_helper, pet_aim");
+	Console()->Register("tt_admin_cosmetic", "i[client_id] s[cosmetic] s[on|off]", CFGFLAG_SERVER, ConAdminCosmetic, this, "Set rainbow, bw_rainbow, bloody, or fastweapons for a player");
+	Console()->Register("tt_admin_teleport", "i[source_id] i[target_id]", CFGFLAG_SERVER, ConAdminTeleport, this, "Teleport a player to another player, regardless of practice mode");
+	Console()->Register("tt_admin_teleport_all", "i[target_id]", CFGFLAG_SERVER, ConAdminTeleportAll, this, "Teleport all players and bots to a player ID, regardless of practice or teams");
+	Console()->Register("tt_admin_teleport_all_xy", "s[x] s[y]", CFGFLAG_SERVER, ConAdminTeleportAllXY, this, "Teleport all players and bots to tile coordinates; prefix an axis with ~ for a per-player offset");
 	Console()->Register("kill_pl", "v[id] ?r[reason]", CFGFLAG_SERVER, ConKillPlayer, this, "Kills a player and announces the kill");
 	Console()->Register("totele", "i[number]", CFGFLAG_SERVER | CMDFLAG_TEST, ConToTeleporter, this, "Teleports you to teleporter i");
 	Console()->Register("totelecp", "i[number]", CFGFLAG_SERVER | CMDFLAG_TEST, ConToCheckTeleporter, this, "Teleports you to checkpoint teleporter i");
-	Console()->Register("tele", "?v[id] ?v[id]", CFGFLAG_SERVER | CMDFLAG_TEST, ConTeleport, this, "Teleports player i (or you) to player i (or you to where you look at)");
+	Console()->Register("tele", "?v[id] ?v[id]", CFGFLAG_SERVER, ConTeleport, this, "RCON: teleport player i to player i; in-game practice behavior remains practice-gated");
 	Console()->Register("addweapon", "i[weapon-id]", CFGFLAG_SERVER | CMDFLAG_TEST, ConAddWeapon, this, "Gives weapon with id i to you (all = -1, hammer = 0, gun = 1, shotgun = 2, grenade = 3, laser = 4, ninja = 5)");
 	Console()->Register("removeweapon", "i[weapon-id]", CFGFLAG_SERVER | CMDFLAG_TEST, ConRemoveWeapon, this, "removes weapon with id i from you (all = -1, hammer = 0, gun = 1, shotgun = 2, grenade = 3, laser = 4, ninja = 5)");
 	Console()->Register("shotgun", "", CFGFLAG_SERVER | CMDFLAG_TEST, ConShotgun, this, "Gives a shotgun to you");
@@ -4149,6 +4171,13 @@ void CGameContext::RegisterChatCommands()
 	Console()->Register("spawn", "", CFGFLAG_CHAT | CFGFLAG_SERVER, ConSpawn, this, "Travel to spawn");
 	Console()->Register("pet_spawn", "", CFGFLAG_CHAT | CFGFLAG_SERVER, ConPetSpawn, this, "Spawn your pet");
 	Console()->Register("pet_upgrade", "s[race|blocker|defense|helper|aim]", CFGFLAG_CHAT | CFGFLAG_SERVER, ConPetUpgrade, this, "Upgrade one of your pet's five skills");
+	Console()->Register("pet_weapon", "s[gun|shotgun|grenade|laser|ninja]", CFGFLAG_CHAT | CFGFLAG_SERVER, ConPetWeapon, this, "Permanently buy a weapon for your pet");
+	Console()->Register("pet_emoticon", "s[hearts|ghost|sushi|music|zomg|deviltee|off] s[buy|use]", CFGFLAG_CHAT | CFGFLAG_SERVER, ConPetPopupEmote, this, "Buy or activate your pet's overhead popup emoticon");
+	Console()->Register("pet_popup_emote", "s[hearts|ghost|sushi|music|zomg|deviltee|off] s[buy|use]", CFGFLAG_CHAT | CFGFLAG_SERVER, ConPetPopupEmote, this, "Alias for pet_emoticon");
+	Console()->Register("pet_facial_emote", "s[normal|happy|surprise|angry|pain|blink] s[buy|use]", CFGFLAG_CHAT | CFGFLAG_SERVER, ConPetFacialEmote, this, "Buy or activate your pet's facial eye emote");
+	Console()->Register("pet_rename", "s[name]", CFGFLAG_CHAT | CFGFLAG_SERVER, ConPetRename, this, "Rename your pet for $25000");
+	Console()->Register("pet_skin_copy", "", CFGFLAG_CHAT | CFGFLAG_SERVER, ConPetSkinCopy, this, "Buy and save a copy of your current skin and colors for your pet");
+	Console()->Register("pet_skin_set", "s[skin] s[body_color] s[feet_color]", CFGFLAG_CHAT | CFGFLAG_SERVER, ConPetSkinSet, this, "Set your pet skin and colors explicitly for $50000");
 	Console()->Register("pet_relation", "s[help|block|neutral] s[in-game name]", CFGFLAG_CHAT | CFGFLAG_SERVER, ConPetRelation, this, "Set which in-game names your pet rescues or blocks");
 	Console()->Register("pet_relations", "", CFGFLAG_CHAT | CFGFLAG_SERVER, ConPetRelations, this, "List your pet's help and block targets");
 	Console()->Register("pet_freeze_timeout", "i[seconds: 0 or 1-120]", CFGFLAG_CHAT | CFGFLAG_SERVER, ConPetFreezeTimeout, this, "Seconds before a frozen pet respawns; 0 disables it");
@@ -4261,6 +4290,22 @@ void CGameContext::RegisterChatCommands()
 
 void CGameContext::OnInit(const void *pPersistentData)
 {
+	// Event phases run on game ticks. SQLite stores the cooldown and active-event
+	// marker, which is cleared here so an interrupted server start can recover.
+	m_EventState = 0;
+	m_EventType = 0;
+	m_EventPhase = 0;
+	m_EventPhaseEndTick = 0;
+	m_EventNextUpdateTick = 0;
+	m_EventRemainingSeconds = 0;
+	m_EventPlayerCount = 0;
+	m_EventWinnerClientId = -1;
+	{
+		std::lock_guard<std::mutex> Lock(m_EventPlayersMutex);
+		playersJoined.clear();
+	}
+	ignorePlayers.clear();
+
 	for(auto &State : m_aFreezeTileState)
 		State = {};
 	const CPersistentData *pPersistent = (const CPersistentData *)pPersistentData;
@@ -4276,7 +4321,7 @@ void CGameContext::OnInit(const void *pPersistentData)
 	if(DbResult == SQLITE_OK)
 	{
 		const char *pAccountSchema = "CREATE TABLE IF NOT EXISTS ACCOUNTS (ID INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, NAME TEXT NOT NULL, PASSWORD TEXT NOT NULL, RANK INTEGER NOT NULL, MONEY INTEGER NOT NULL, LEVEL INTEGER NOT NULL, EXP INTEGER NOT NULL, HOUSE INTEGER NOT NULL, VIP INTEGER NOT NULL, REBIRTH INTEGER NOT NULL);";
-		const char *pBotSchema = "CREATE TABLE IF NOT EXISTS BOTS (ID INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, OWNER_NAME TEXT NOT NULL, NAME TEXT NOT NULL, LEVEL INTEGER NOT NULL, EXP INTEGER NOT NULL, HEALTH INTEGER NOT NULL, ARMOR INTEGER NOT NULL, WEAPON INTEGER NOT NULL, KILLS INTEGER NOT NULL, SKILL_RACE INTEGER NOT NULL DEFAULT 1, SKILL_BLOCKER INTEGER NOT NULL DEFAULT 1, SKILL_DEFENSE INTEGER NOT NULL DEFAULT 1, SKILL_HELPER INTEGER NOT NULL DEFAULT 1, SKILL_AIM INTEGER NOT NULL DEFAULT 1, FREEZE_RESPAWN_SECONDS INTEGER NOT NULL DEFAULT 10);";
+		const char *pBotSchema = "CREATE TABLE IF NOT EXISTS BOTS (ID INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, OWNER_NAME TEXT NOT NULL, NAME TEXT NOT NULL, LEVEL INTEGER NOT NULL, EXP INTEGER NOT NULL, HEALTH INTEGER NOT NULL, ARMOR INTEGER NOT NULL, WEAPON INTEGER NOT NULL, KILLS INTEGER NOT NULL, SKILL_RACE INTEGER NOT NULL DEFAULT 1, SKILL_BLOCKER INTEGER NOT NULL DEFAULT 1, SKILL_DEFENSE INTEGER NOT NULL DEFAULT 1, SKILL_HELPER INTEGER NOT NULL DEFAULT 1, SKILL_AIM INTEGER NOT NULL DEFAULT 1, FREEZE_RESPAWN_SECONDS INTEGER NOT NULL DEFAULT 10, PET_WEAPONS INTEGER NOT NULL DEFAULT 0, PET_POPUP_EMOTES INTEGER NOT NULL DEFAULT 4, PET_POPUP_EMOTE INTEGER NOT NULL DEFAULT 2, PET_SKIN_DATA TEXT NOT NULL DEFAULT '', PET_FACIAL_EMOTES INTEGER NOT NULL DEFAULT 1, PET_FACIAL_EMOTE INTEGER NOT NULL DEFAULT 0);";
 		char *pError = nullptr;
 		DbResult = sqlite3_exec(db, pAccountSchema, nullptr, nullptr, &pError);
 		if(DbResult == SQLITE_OK)
@@ -4287,6 +4332,12 @@ void CGameContext::OnInit(const void *pPersistentData)
 		{
 			bool aHasSkill[NUM_PET_SKILLS] = {};
 			bool HasFreezeTimeout = false;
+			bool HasPetWeapons = false;
+			bool HasPetPopupEmotes = false;
+			bool HasPetPopupEmote = false;
+			bool HasPetSkinData = false;
+			bool HasPetFacialEmotes = false;
+			bool HasPetFacialEmote = false;
 			sqlite3_stmt *pColumns = nullptr;
 			DbResult = sqlite3_prepare_v2(db, "PRAGMA table_info(BOTS)", -1, &pColumns, nullptr);
 			if(DbResult == SQLITE_OK)
@@ -4299,6 +4350,18 @@ void CGameContext::OnInit(const void *pPersistentData)
 							aHasSkill[Skill] = true;
 					if(pName && str_comp(pName, "FREEZE_RESPAWN_SECONDS") == 0)
 						HasFreezeTimeout = true;
+					if(pName && str_comp(pName, "PET_WEAPONS") == 0)
+						HasPetWeapons = true;
+					if(pName && str_comp(pName, "PET_POPUP_EMOTES") == 0)
+						HasPetPopupEmotes = true;
+					if(pName && str_comp(pName, "PET_POPUP_EMOTE") == 0)
+						HasPetPopupEmote = true;
+					if(pName && str_comp(pName, "PET_SKIN_DATA") == 0)
+						HasPetSkinData = true;
+					if(pName && str_comp(pName, "PET_FACIAL_EMOTES") == 0)
+						HasPetFacialEmotes = true;
+					if(pName && str_comp(pName, "PET_FACIAL_EMOTE") == 0)
+						HasPetFacialEmote = true;
 				}
 			}
 			sqlite3_finalize(pColumns);
@@ -4312,8 +4375,47 @@ void CGameContext::OnInit(const void *pPersistentData)
 			}
 			if(DbResult == SQLITE_OK && !HasFreezeTimeout)
 				DbResult = sqlite3_exec(db, "ALTER TABLE BOTS ADD COLUMN FREEZE_RESPAWN_SECONDS INTEGER NOT NULL DEFAULT 10", nullptr, nullptr, &pError);
+			if(DbResult == SQLITE_OK && !HasPetWeapons)
+			{
+				DbResult = sqlite3_exec(db, "ALTER TABLE BOTS ADD COLUMN PET_WEAPONS INTEGER NOT NULL DEFAULT 0", nullptr, nullptr, &pError);
+				// Preserve the old progressive weapon unlock for existing pets.
+				if(DbResult == SQLITE_OK)
+					DbResult = sqlite3_exec(db, "UPDATE BOTS SET PET_WEAPONS = CASE WHEN WEAPON >= 4 THEN 30 WHEN WEAPON = 3 THEN 14 WHEN WEAPON = 2 THEN 6 WHEN WEAPON = 1 THEN 2 ELSE 0 END", nullptr, nullptr, &pError);
+			}
+			if(DbResult == SQLITE_OK && !HasPetPopupEmotes)
+				DbResult = sqlite3_exec(db, "ALTER TABLE BOTS ADD COLUMN PET_POPUP_EMOTES INTEGER NOT NULL DEFAULT 4", nullptr, nullptr, &pError);
+			if(DbResult == SQLITE_OK && !HasPetPopupEmote)
+				DbResult = sqlite3_exec(db, "ALTER TABLE BOTS ADD COLUMN PET_POPUP_EMOTE INTEGER NOT NULL DEFAULT 2", nullptr, nullptr, &pError);
+			if(DbResult == SQLITE_OK && !HasPetSkinData)
+				DbResult = sqlite3_exec(db, "ALTER TABLE BOTS ADD COLUMN PET_SKIN_DATA TEXT NOT NULL DEFAULT ''", nullptr, nullptr, &pError);
+			if(DbResult == SQLITE_OK && !HasPetFacialEmotes)
+				DbResult = sqlite3_exec(db, "ALTER TABLE BOTS ADD COLUMN PET_FACIAL_EMOTES INTEGER NOT NULL DEFAULT 1", nullptr, nullptr, &pError);
+			if(DbResult == SQLITE_OK && !HasPetFacialEmote)
+				DbResult = sqlite3_exec(db, "ALTER TABLE BOTS ADD COLUMN PET_FACIAL_EMOTE INTEGER NOT NULL DEFAULT 0", nullptr, nullptr, &pError);
 			if(DbResult == SQLITE_OK)
 				DbResult = sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS PET_RELATIONS (OWNER_NAME TEXT NOT NULL, TARGET_NAME TEXT NOT NULL, RELATION INTEGER NOT NULL, PRIMARY KEY (OWNER_NAME, TARGET_NAME))", nullptr, nullptr, &pError);
+		if(DbResult == SQLITE_OK)
+			DbResult = sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS TT_EVENT_STATE (ID INTEGER PRIMARY KEY CHECK(ID = 1), LAST_START_UNIX INTEGER NOT NULL DEFAULT 0, ACTIVE_EVENT INTEGER NOT NULL DEFAULT 0)", nullptr, nullptr, &pError);
+		if(DbResult == SQLITE_OK)
+		{
+			bool HasActiveEventColumn = false;
+			sqlite3_stmt *pEventColumns = nullptr;
+			DbResult = sqlite3_prepare_v2(db, "PRAGMA table_info(TT_EVENT_STATE)", -1, &pEventColumns, nullptr);
+			if(DbResult == SQLITE_OK)
+			{
+				while(sqlite3_step(pEventColumns) == SQLITE_ROW)
+				{
+					const char *pColumn = reinterpret_cast<const char *>(sqlite3_column_text(pEventColumns, 1));
+					if(pColumn && str_comp(pColumn, "ACTIVE_EVENT") == 0)
+						HasActiveEventColumn = true;
+				}
+			}
+			sqlite3_finalize(pEventColumns);
+			if(DbResult == SQLITE_OK && !HasActiveEventColumn)
+				DbResult = sqlite3_exec(db, "ALTER TABLE TT_EVENT_STATE ADD COLUMN ACTIVE_EVENT INTEGER NOT NULL DEFAULT 0", nullptr, nullptr, &pError);
+			if(DbResult == SQLITE_OK)
+				DbResult = sqlite3_exec(db, "INSERT OR IGNORE INTO TT_EVENT_STATE (ID, LAST_START_UNIX, ACTIVE_EVENT) VALUES (1, 0, 0); UPDATE TT_EVENT_STATE SET ACTIVE_EVENT = 0 WHERE ID = 1", nullptr, nullptr, &pError);
+		}
 		}
 		if(DbResult != SQLITE_OK)
 		{
@@ -4522,8 +4624,6 @@ void CGameContext::OnInit(const void *pPersistentData)
 
 	// Initialize the pet navigation graph from the loaded game layer.
 	m_pBotEngine->Init(const_cast<CTile *>(m_Collision.GameLayer()), m_Collision.GetWidth(), m_Collision.GetHeight());
-	created = true;
-
 	// create all entities from the game layer
 	CreateAllEntities(true);
 

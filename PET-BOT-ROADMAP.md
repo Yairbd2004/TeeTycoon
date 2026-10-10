@@ -3,6 +3,16 @@
 The vote menu is complete. Pets now use virtual internal client IDs outside
 the human connection range. Both admin blocker variants are implemented.
 
+## Project attribution
+
+Planned goal: audit project-maintained documentation, server branding, and
+release materials so they identify the mod as TeeTycoon and credit Yair as its
+creator. In one or two suitable project-level places, describe TeeTycoon as a
+mod created by Yair and based on DDNet 20.1.1. Keep DDNet's upstream copyright,
+license, and third-party notices intact; give DDNet a respectful upstream
+acknowledgment without repeating it throughout gameplay text. Check that future
+release notes and packaged project information preserve the same attribution.
+
 ## Bot slots
 
 1. Trace every use of bot client IDs through `AddBot`, `CBot`, `CPlayer`,
@@ -31,6 +41,15 @@ IDs above the real connection limit. Human clients can still receive bot tees
 through snapshots. Bot spawn no longer sends tuning/team packets or starts a
 player demo for a virtual ID. This addresses the
 `Invalid pChunk->m_ClientId: 64` spawn crash.
+
+## Virtual ID safety invariant
+
+Every pet command must treat a pet ID as an internal actor ID, not as a human
+connection ID. Do not pass pet IDs to APIs that send client messages, query
+human connection state, or assume a network-visible ID. Read and update pet
+names, emotes, appearance, and other persistent state through `CPlayer` and the
+database; use an explicit visible-ID mapping only when producing a snapshot.
+Review this boundary whenever adding pet commands or server callbacks.
 
 ## House and team integration
 

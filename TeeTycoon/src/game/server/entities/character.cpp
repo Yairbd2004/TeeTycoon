@@ -543,16 +543,16 @@ void CCharacter::FireWeapon()
 		if(m_Core.m_HammerHitDisabled)
 			break;
 
-		CEntity *apEnts[MAX_CLIENTS];
 		int Hits = 0;
-		int Num = GameServer()->m_World.FindEntities(ProjStartPos, GetProximityRadius() * 0.5f, apEnts,
-			MAX_CLIENTS, CGameWorld::ENTTYPE_CHARACTER);
-
-		for(int i = 0; i < Num; ++i)
+		// Virtual bots do not consume client slots. Walk every character so a
+		// crowd of bots cannot fill a fixed-size query buffer and hide a target
+		// that is still inside normal hammer range.
+		for(CCharacter *pTarget = (CCharacter *)GameServer()->m_World.FindFirst(CGameWorld::ENTTYPE_CHARACTER);
+			pTarget; pTarget = (CCharacter *)pTarget->TypeNext())
 		{
-			auto *pTarget = static_cast<CCharacter *>(apEnts[i]);
-
 			if((pTarget == this || (pTarget->IsAlive() && !CanCollide(pTarget->GetPlayer()->GetCid()))))
+				continue;
+			if(distance(pTarget->m_Pos, ProjStartPos) >= GetProximityRadius() * 0.5f + pTarget->GetProximityRadius() + 2.0f)
 				continue;
 
 			// set their velocity to fast upward (for now)
@@ -711,6 +711,14 @@ void CCharacter::GiveNinja()
 	// GameServer()->CreateSound(m_Pos, SOUND_PICKUP_NINJA, TeamMask());
 }
 
+void CCharacter::GiveNinjaWeapon()
+{
+	// Pet ownership is permanent, while activating the weapon is a tactical
+	// decision made by the bot. Keep it in inventory without starting its timer.
+	m_Core.m_aWeapons[WEAPON_NINJA].m_Got = true;
+	m_Core.m_aWeapons[WEAPON_NINJA].m_Ammo = -1;
+}
+
 void CCharacter::RemoveNinja()
 {
 	m_Core.m_Ninja.m_ActivationDir = vec2(0, 0);
@@ -732,6 +740,8 @@ void CCharacter::SetEmote(int Emote, int Tick)
 
 int CCharacter::DetermineEyeEmote()
 {
+	if(GetPlayer()->m_IsBot)
+		return GetPlayer()->m_IsBlocker ? EMOTE_ANGRY : GetPlayer()->m_PetFacialEmote;
 	const bool IsFrozen = m_Core.m_DeepFrozen || m_FreezeTime > 0 || m_Core.m_LiveFrozen;
 	const bool HasNinjajetpack = m_pPlayer->m_NinjaJetpack && m_Core.m_Jetpack && m_Core.m_ActiveWeapon == WEAPON_GUN;
 
@@ -1746,14 +1756,31 @@ void CCharacter::addMoney()
 
 void CCharacter::HandleBlood()
 {
-	if(m_Bloody || m_Bloody_item)
-	{
-		GameServer()->CreateDeath(m_Pos, m_pPlayer->GetCid(), Teams()->TeamMask(Team()));
-	}
+	if((!m_Bloody && !m_Bloody_item) || m_pPlayer->IsBot())
+		return;
+
+	const int ClientId = m_pPlayer->GetCid();
+	if(ClientId < 0 || ClientId >= MAX_CLIENTS)
+		return;
+
+	const int Tick = Server()->Tick();
+	if(Tick < m_NextBloodyEffectTick)
+		return;
+
+	// A death event is a comparatively heavy network effect. Emit it at a
+	// cosmetic cadence instead of generating one on every character tick.
+	m_NextBloodyEffectTick = Tick + std::max(1, Server()->TickSpeed() / 5);
+	GameServer()->CreateDeath(m_Pos, ClientId, Teams()->TeamMask(Team()));
 }
 
 void CCharacter::HandleRainbow()
 {
+	// Virtual bots can use internal IDs outside the network client range. They
+	// do not have client info to update, and broadcasting their appearance can
+	// produce invalid client-ID network events.
+	if(m_pPlayer->IsBot())
+		return;
+
 	if(m_pPlayer->m_Rainbow == RAINBOW_COLOR)
 	{
 		m_pPlayer->TeeInfos().m_UseCustomColor = 1;
@@ -1796,6 +1823,7 @@ void CCharacter::TeeTycoonInit()
 	m_LastIndexFrontTile = 0;
 	m_Bloody = 0;
 	m_Bloody_item = 0;
+	m_NextBloodyEffectTick = 0;
 }
 
 void CCharacter::TeeTycoonTick()
@@ -1906,14 +1934,14 @@ void CCharacter::HandleTiles(int Index)
 				m_pPlayer->m_Rainbow = RAINBOW_NONE;
 				m_pPlayer->TeeInfos().m_ColorBody = m_pPlayer->m_LastBodyR;
 				m_pPlayer->TeeInfos().m_ColorFeet = m_pPlayer->m_LastFeetR;
-				str_format(aBuf, sizeof(aBuf), "Rainbow disabled");
+				str_copy(aBuf, "Rainbow disabled", sizeof(aBuf));
 			}
 			else
 			{
 				m_pPlayer->m_LastBodyR = m_pPlayer->TeeInfos().m_ColorBody;
 				m_pPlayer->m_LastFeetR = m_pPlayer->TeeInfos().m_ColorFeet;
 				m_pPlayer->m_Rainbow = RAINBOW_COLOR;
-				str_format(aBuf, sizeof(aBuf), "Rainbow enabled");
+				str_copy(aBuf, "Rainbow enabled", sizeof(aBuf));
 			}
 
 			GameServer()->SendChatTarget(m_pPlayer->GetCid(), aBuf);
@@ -1929,12 +1957,12 @@ void CCharacter::HandleTiles(int Index)
 		if(m_Bloody)
 		{
 			m_Bloody = false;
-			str_format(aBuf, sizeof(aBuf), "Bloody disabled");
+			str_copy(aBuf, "Bloody disabled", sizeof(aBuf));
 		}
 		else
 		{
 			m_Bloody = true;
-			str_format(aBuf, sizeof(aBuf), "Bloody enabled");
+			str_copy(aBuf, "Bloody enabled", sizeof(aBuf));
 		}
 
 		GameServer()->SendChatTarget(m_pPlayer->GetCid(), aBuf);
@@ -1950,13 +1978,13 @@ void CCharacter::HandleTiles(int Index)
 		{
 			m_FastReload = false;
 			m_ReloadMultiplier = 1000;
-			str_format(aBuf, sizeof(aBuf), "FastWeapons disabled");
+			str_copy(aBuf, "FastWeapons disabled", sizeof(aBuf));
 		}
 		else
 		{
 			m_FastReload = true;
 			m_ReloadMultiplier = 10000;
-			str_format(aBuf, sizeof(aBuf), "FastWeapons enabled");
+			str_copy(aBuf, "FastWeapons enabled", sizeof(aBuf));
 		}
 
 		GameServer()->SendChatTarget(m_pPlayer->GetCid(), aBuf);

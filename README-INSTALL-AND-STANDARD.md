@@ -135,10 +135,13 @@ each next price and the overall rating. Upgrades are saved in `Accounts.sqlite`
 and older BOTS rows gain default level-1 skill columns when the server starts.
 Spawned pets apply purchased skill levels on their next bot tick. Race and
 Helper use a nearby tile route to get around walls and reach safe rescue
-positions; Defense rejects dangerous movement and hook pulls. A pet only fires
-weapons recorded in its saved pet weapon tier: skill levels do not grant laser.
-If laser is owned, distant rescues prefer it; close rescues use hammer, and
-hammer-only pets close in or hook the frozen player toward safety.
+positions; Defense rejects dangerous movement and hook pulls. Pet weapons can
+be bought permanently with `/pet_weapon gun|shotgun|grenade|laser|ninja`; the
+saved weapon mask is applied to the active pet immediately and restored after
+each spawn. Existing pets keep weapons from their former weapon tier during the
+database migration. If laser is owned, distant rescues prefer it; close rescues
+use hammer. Ninja stays in inventory and is activated only for short travel
+bursts when the owner is far away, then waits through a cooldown.
 The portable decision rules are in `TeeTycoon/src/game/server/bot_ai/`;
 `bot.cpp` and `botengine.cpp` remain the DDNet adapter and pathfinder.
 
@@ -174,19 +177,41 @@ Start the standard local build by running `DDNet-Server.exe` from its build dire
 
 For local-network discovery, the DDNet client sends LAN broadcasts to UDP ports 8303–8310. Keep the server on one of those ports; `sv_register 0` disables public master-server registration but does not disable LAN discovery. If the server is running but not in the LAN list, try connecting directly to its LAN IPv4 address and port, then check Windows Defender Firewall for an inbound allow rule for the **current** `DDNet-Server.exe` path. Allow it on the Private profile for a trusted home/work LAN; do not disable the firewall. A newly built executable in a different folder may need a new rule. On the original development computer, the Wi-Fi profile is now Private and a Private-only inbound rule allows this build's executable on UDP 8303. Firewall rules and network profiles are per-computer and must be set again on a new machine.
 
-Be aware that DDNet searches configured storage paths in order. The default `$DATADIR` config is normally read before the build directory's `$CURRENTDIR`; a separate `autoexec_server.cfg` beside the executable may therefore not be the active config. The default data config executes `myServerconfig.cfg` as a customization hook, which is the intended place to override settings such as `sv_name`, `sv_map`, and `sv_port`. Confirm the active name/map in the startup log. Both `TeeTycoon/data/maps/TeeTycoon.map` and `TeeTycoon/data/maps7/TeeTycoon.map` are tracked and staged into build data by CMake. The 0.7 variant was generated with DDNet's `map_convert_07`. The server was startup-verified using these map files on the new-PC build; no 0.7 client visual/gameplay session has been tested yet.
+Be aware that DDNet searches configured storage paths in order. The default `$DATADIR` config is normally read before the build directory's `$CURRENTDIR`; a separate `autoexec_server.cfg` beside the executable may therefore not be the active config. The default data config executes `myServerconfig.cfg` as a customization hook, which is the intended place to override settings such as `sv_name`, `sv_map`, and `sv_port`. Confirm the active name/map in the startup log. `TeeTycoonV1` is the default map. Its main and 0.7 map files are in `TeeTycoon/data/maps` and `TeeTycoon/data/maps7` and are staged into build data by CMake. The 0.7 variant was generated with DDNet's `map_convert_07`; the editable map and layout notes are described in `map_design/README.md`.
 
 LAN check on the original development computer: the 20.1.1 server build completed, started with the staged TeeTycoon config/name, and bound UDP 8303. A Private-only Windows Defender Firewall rule for this exact executable is enabled on the trusted Private Wi-Fi profile. LAN listing was not verified from a second device; if it still does not appear, test direct IPv4:8303 connectivity and check client/server network profiles and firewall rules.
 
 The normal browser game type is `TT`. The tracked server override sets `sv_test_cmds 0`, so the running server is not in DDNet test mode and does not enable test/cheat commands. If test mode is deliberately enabled for development, the browser label is `TestTT`.
 
-Runtime databases, server configs, and event files are not source files and must be backed up separately when moving machines. The development server keeps `Accounts.sqlite` beside `TeeTycoon Server/DDNet-Server.exe`; preserve it when recreating the build directory. A fresh clone does **not** contain ignored `out/` data. Before using a new build with existing player accounts, copy the needed database/config/event files from a verified backup and keep an untouched backup. Never commit live databases, passwords, or private server configuration.
+Runtime databases and server configs are not source files and must be backed up separately when moving machines. The development server keeps `Accounts.sqlite` beside `TeeTycoon Server/DDNet-Server.exe`; it stores accounts, pets, pet relations, and the event-vote cooldown. Active event registration is transient server state and does not need a file. A fresh clone does **not** contain ignored `out/` data. Before using a new build with existing player accounts, copy the database and local server config from a verified backup and keep an untouched backup. Never commit live databases, passwords, or private server configuration.
+
+## Linux server build for Debian VPS hosting
+
+For the Pterodactyl/Pelican Debian yolk (`ghcr.io/parkervcp/yolks:debian`), build a native Linux x86-64 server; the Windows `.exe` cannot run in that container. The package produced for the current VPS setup is `TeeTycoon-prod-linux/teeworlds_srv`, with `data/`, `storage.cfg`, and a `start-server.sh` launcher. It was built in Debian stable (Debian 13) with GCC 14, CMake 3.31, Ninja 1.12, Python 3.13, and Rust 1.85.
+
+On a Debian stable x86-64 build machine, install `build-essential cmake ninja-build python3 python3-dev rustc cargo pkg-config libcurl4-openssl-dev libsqlite3-dev libpng-dev libssl-dev zlib1g-dev`, then configure and build outside `out/build` so the Windows build layout remains unchanged:
+
+```sh
+cmake -S TeeTycoon -B /tmp/teetycoon-linux-build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DCLIENT=OFF -DSERVER=ON \
+  -DPREFER_BUNDLED_LIBS=ON -DPython3_EXECUTABLE=/usr/bin/python3 \
+  -DDOWNLOAD_GTEST=OFF -DSERVER_EXECUTABLE=teeworlds_srv
+cmake --build /tmp/teetycoon-linux-build --target game-server --parallel 4
+```
+
+Deploy the resulting `teeworlds_srv`, `storage.cfg`, and staged `data/` together. Start it from that directory with `./teeworlds_srv` (or `./start-server.sh`) and keep `Accounts.sqlite` there for persistent account data. The executable is dynamically linked; use `ldd teeworlds_srv` to confirm runtime libraries are available in the selected container. The current VPS package targets Linux x86-64 and sets `sv_register ipv4` so a host without outbound IPv6 does not keep retrying failed IPv6 registration.
+
+## Production release archives
+
+When asked for a production build, create a Linux x86-64 `.tar.gz` archive in `prod-releases/` named `TeeTycoon-vX.Y.Z-linux-amd64.tar.gz`. Keep the archive's contents at its root so extraction directly into `/home/container` places `teeworlds_srv`, `storage.cfg`, and `data/` beside one another. Store the executable and launcher with mode `755`; ordinary files use `644`. Choose the next TeeTycoon release version based on the scope of changes, independently of the upstream DDNet version. Do not include development databases. The first packaged release is `TeeTycoon-v0.1.0-linux-amd64.tar.gz`.
 
 ## Source map for catching up
 
 Start with the current `dev` diff/log, then these locations. Search for command registration and table/entity setup rather than relying only on file names; upstream updates can move code.
 
 - `TeeTycoon/src/game/server/teetycoon.cpp` — main TeeTycoon mode logic: economy/progression, custom tiles/entities, house/pet and related server behavior.
+- `TeeTycoon/src/game/server/ddracecommands.cpp`, `teetycoon.cpp`, and `gamecontext.cpp` — global event votes, registration, and the event runner. Active event state stays in memory; the 10-minute event-vote cooldown is persisted in `TT_EVENT_STATE` in `Accounts.sqlite`. Event registration no longer depends on `StartingEvent.txt` or `EventType.txt`.
+- `TeeTycoon/src/game/server/entities/character.cpp` — TeeTycoon character cosmetics. Bloody effects must stay rate-limited and must never emit death events using virtual bot IDs.
 - `TeeTycoon/data/autoexec_server.cfg` — global event start votes only. The server builds a separate vote-option page for each player: event votes and category labels on the main page, then private Shop, Pet, Cosmetics, Travel, and Account pages with a Back label. Status rows do nothing when selected; personal actions execute immediately, while event starts remain global ballots.
 - `TeeTycoon/src/game/server/gamecontext.cpp` and `teetycoon.cpp` — the server sends and validates each player's current vote page. `gamecontext.cpp` initializes the shared account database and pet tables; `teetycoon.cpp` builds private status labels and owns the personal action allowlist. `player.h` stores each player's current page and labels. The client renders the server list directly so the same categories work in custom and standard DDNet clients. Refresh the page after changing displayed status; keep private data out of global `add_vote` options.
 - Pet purchases save the pet and charge money in one SQLite transaction; event start commands are only submitted after their global vote passes. When adding personal menu actions, update the menu builder and allowlist together.

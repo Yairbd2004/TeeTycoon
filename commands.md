@@ -29,7 +29,7 @@ The in-game vote menu also has Shop, Pet, Cosmetics, Travel, and Account pages. 
 | `/accept`, `/decline` | Accept or decline a house invitation. An accepted visit moves you and your pet into the host's house team. |
 | `/leave_house` | Return from a house visit to your previous position and team. |
 
-Shop quick reference: farm/money tile has 100 levels; house has levels 0–2; VIP has levels 0–5. Rebirth requires house level 2 and resets money, farm, house, and VIP. A pet costs $1,000,000 and ownership is saved. Rainbow costs $10,000 and bloody costs $50,000; both effects last until death or until turned off.
+Shop quick reference: farm/money tile has 100 levels; house has levels 0–4 (five rooms on TeeTycoonV1); VIP has levels 0–5. Rebirth requires house level 4 and resets money, farm, house, and VIP. A pet costs $1,000,000 and ownership is saved. Rainbow costs $10,000 and bloody costs $50,000; both effects last until death or until turned off.
 
 ### Pet
 
@@ -37,6 +37,13 @@ Shop quick reference: farm/money tile has 100 levels; house has levels 0–2; VI
 | --- | --- |
 | `/pet_spawn` | Spawn your owned pet. It uses a virtual bot ID instead of a human connection slot. |
 | `/pet_profile [player name]` | Show your pet's level, weapon, skills, and other stats; an optional online **in-game name** selects another player's pet. |
+| `/pet_weapon <gun\|shotgun\|grenade\|laser\|ninja>` | Permanently unlock a weapon for your pet. It is saved to your account, given to a spawned pet immediately, and restored every time it spawns. Costs: gun $10,000; shotgun $25,000; grenade $50,000; laser $100,000; ninja $250,000. |
+| `/pet_emoticon <hearts\|ghost\|sushi\|music\|zomg\|deviltee> <buy\|use>` | Buy or activate an overhead popup emoticon. Hearts is free; other prices are shown in the Pet vote-menu page. |
+| `/pet_emoticon off use` | Stop your pet's overhead popup-emoticon spam. `/pet_popup_emote` remains as an alias. |
+| `/pet_facial_emote <normal\|happy\|surprise\|angry\|pain\|blink> <buy\|use>` | Buy or activate the pet's facial eye emote. Normal is included; the Pet vote-menu page shows prices for the others. |
+| `/pet_rename <name>` | Rename your pet for $25,000. Use quotes for spaces; names must be valid UTF-8 and no longer than 15 bytes. |
+| `/pet_skin_copy` | For $50,000, copy your current skin and colors to your pet. Change your look before buying; you can buy it again whenever you want. |
+| `/pet_skin_set <skin> <body-color> <feet-color>` | Set the pet's skin name and custom body/feet colors for $50,000. Skin names accept letters, digits, `_`, or `-` (up to 23 bytes); colors accept decimal or `0x` notation in the range `0`–`0xFFFFFF`. |
 | `/stay enable` | Tell a spawned pet to stay here. |
 | `/stay disable` | Tell a spawned pet to follow you. |
 | `/pet_upgrade <race\|blocker\|defense\|helper\|aim>` | Buy one level of a pet skill. Skills start at level 1 and cap at 10; next-level cost is `$100,000 × current level²`. A spawned pet uses the upgrade immediately. |
@@ -45,6 +52,8 @@ Shop quick reference: farm/money tile has 100 levels; house has levels 0–2; VI
 | `/pet_freeze_timeout <seconds>` | Respawn a pet after 1–120 seconds of continuous freeze; `0` disables automatic freeze respawn. Default: 10 seconds. |
 
 For example: `/pet_relation help "Player Name"`, `/pet_relation block Rival`, then `/pet_relations`. Pet relations use in-game names, so they can include players who never logged in. They are saved with your account.
+
+Pet ninja is used in short bursts of up to 10 seconds, only while the pet is far from its owner and traveling. It then waits before using ninja again. Buying ninja unlocks it permanently; the pet does not stay in ninja mode between bursts.
 
 ### Events and cosmetics
 
@@ -99,3 +108,32 @@ Set these in the server config or RCON, for example `sv_bot_damage_mode 1`.
 | `sv_botengine_draw_graph` | `0` | Draw the bot navigation graph for debugging. |
 
 `0` disables and `1` enables the switches above. Other DDNet administration commands still exist; this page focuses on TeeTycoon features. Useful related RCON commands include `kill_pl <id> [reason]` and `set_team_ddr <id> <team>`. Normal players cannot set DDNet teams themselves.
+
+## RCON administration
+
+These commands are server-console/RCON commands. Player arguments use the current in-game client ID shown by the server, and account changes require that player to be connected and logged in. Money, levels, and permanent upgrades are saved to `Accounts.sqlite` immediately.
+
+| Command | Example | Effect |
+|---|---|---|
+| `tt_admin_money <client_id> <amount>` | `tt_admin_money 3 500000` | Adds money, up to the $2,000,000,000 cap. |
+| `tt_admin_levels <client_id> <amount>` | `tt_admin_levels 3 10` | Adds player levels and updates the next XP threshold. |
+| `tt_admin_upgrade <client_id> <upgrade> <amount>` | `tt_admin_upgrade 3 farm 5` | Adds `farm`/`moneytile` (max 100), `house` (max 4), `vip` (max 5), or `rebirth` levels. |
+| `tt_admin_upgrade <client_id> <pet_skill> <amount>` | `tt_admin_upgrade 3 pet_helper 4` | Adds pet skill levels (`pet_race`, `pet_blocker`, `pet_defense`, `pet_helper`, `pet_aim`), capped at 10. Applies immediately to a spawned pet. |
+| `tt_admin_cosmetic <client_id> <cosmetic> <on|off>` | `tt_admin_cosmetic 3 rainbow on` | Turns `rainbow`, `bw_rainbow`, `bloody`, or `fastweapons` on or off for a player. Bloody/fastweapons need the player to be alive. These effects are runtime toggles, not permanent unlocks. |
+| `tele <source_id> <target_id>` | `tele 3 0` | Teleports the source tee to the target. This server-console command works outside practice mode. |
+| `tt_admin_teleport <source_id> <target_id>` | `tt_admin_teleport 3 0` | Same practice-independent teleport with explicit admin naming. |
+| `tt_admin_teleport_all <target_id>` | `tt_admin_teleport_all 0` | Teleports every active human player and bot to the specified client ID, including virtual bot IDs, ignoring teams and practice. |
+| `tt_admin_teleport_all_xy <x> <y>` | `tt_admin_teleport_all_xy 20 15` | Teleports every active human player and bot to map tile coordinates (same coordinate scale as `/tpxy`), ignoring teams and practice. Prefix either axis with `~` to apply that tile offset to each character's current position, such as `tt_admin_teleport_all_xy ~5 ~`. |
+
+## Blocker bot RCON commands
+
+| Command | Example | Effect |
+|---|---|---|
+| `tt_blocker_slot [count]` | `tt_blocker_slot 3` | Spawns up to 32 slot-backed blocker bots. Omit the count for one. Reports how many were created if slots run out. |
+| `tt_blocker_virtual [count]` | `tt_blocker_virtual 3` | Spawns up to 32 virtual blocker bots without connection slots. Omit the count for one. |
+| `tt_blocker_remove <internal_id>` | `tt_blocker_remove 64` | Removes one blocker. |
+| `tt_blocker_remove_all` | `tt_blocker_remove_all` | Removes every active blocker bot, both slot-backed and virtual. |
+| `tt_blocker_list` | `tt_blocker_list` | Lists active blockers and their modes. |
+
+Blockers receive a random name from the built-in meme name list, with duplicate blocker names avoided while alternatives remain. They target all nearby players and other blockers; a configured blocker whitelist still protects its listed in-game names.
+Slot-backed blockers display a randomized ping between 18 and 180 ms and a random country flag. Virtual blockers do not occupy a connection slot and have no scoreboard ping or flag.

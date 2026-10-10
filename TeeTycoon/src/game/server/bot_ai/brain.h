@@ -56,7 +56,21 @@ inline int MovementInterval(int RaceLevel, int DefenseLevel)
 
 inline int PredictionHorizon(int RaceLevel, int DefenseLevel)
 {
-	return 3 + std::max(RaceLevel, DefenseLevel);
+	// Include enough of the jump arc to catch freeze platforms reached after
+	// the initial impulse, while keeping the per-tick simulation bounded.
+	return 6 + std::max(RaceLevel, DefenseLevel) * 2;
+}
+
+// Request the next jump only after the current upward impulse is almost spent.
+// m_JumpedTotal counts air jumps; a grounded jump leaves it at zero, so this
+// naturally delays the second jump until the tee reaches the top of its arc.
+inline bool JumpPressAllowed(bool Requested, int Jumped, int JumpedTotal, float VerticalVelocity)
+{
+	if(!Requested || (Jumped & 1))
+		return false;
+	if(JumpedTotal == 0 && !(Jumped & 2) && VerticalVelocity < -1.5f)
+		return false;
+	return true;
 }
 
 template<typename TPredict>
@@ -143,7 +157,9 @@ inline bool HammerHits(float DeltaX, float DeltaY, float AttackerRadius, float T
 		return true;
 	const float QueryX = DeltaX - DeltaX / Distance * AttackerRadius * 0.75f;
 	const float QueryY = DeltaY - DeltaY / Distance * AttackerRadius * 0.75f;
-	return std::hypot(QueryX, QueryY) < AttackerRadius * 0.5f + TargetRadius;
+	// Match the server's hammer query tolerance (the normal entity query adds
+	// two units to its radius). Keep the prediction and hit check in sync.
+	return std::hypot(QueryX, QueryY) < AttackerRadius * 0.5f + TargetRadius + 2.0f;
 }
 
 inline bool GoodPullAngle(float BotX, float BotY, float TargetX, float TargetY,

@@ -23,6 +23,8 @@
 #include <map>
 #include <array>
 #include <memory>
+#include <atomic>
+#include <mutex>
 #include <optional>
 #include <string>
 
@@ -243,6 +245,12 @@ public:
 	static void ConLogout(IConsole::IResult *pResult, void *pUserData);
 	static void ConPetProfile(IConsole::IResult *pResult, void *pUserData);
 	static void ConPetSpawn(IConsole::IResult *pResult, void *pUserData);
+	static void ConPetWeapon(IConsole::IResult *pResult, void *pUserData);
+	static void ConPetPopupEmote(IConsole::IResult *pResult, void *pUserData);
+	static void ConPetFacialEmote(IConsole::IResult *pResult, void *pUserData);
+	static void ConPetRename(IConsole::IResult *pResult, void *pUserData);
+	static void ConPetSkinCopy(IConsole::IResult *pResult, void *pUserData);
+	static void ConPetSkinSet(IConsole::IResult *pResult, void *pUserData);
 	static void ConPetUpgrade(IConsole::IResult *pResult, void *pUserData);
 	static void ConPetRelation(IConsole::IResult *pResult, void *pUserData);
 	static void ConPetRelations(IConsole::IResult *pResult, void *pUserData);
@@ -250,9 +258,17 @@ public:
 	static void ConBlockerSlot(IConsole::IResult *pResult, void *pUserData);
 	static void ConBlockerVirtual(IConsole::IResult *pResult, void *pUserData);
 	static void ConBlockerRemove(IConsole::IResult *pResult, void *pUserData);
+	static void ConBlockerRemoveAll(IConsole::IResult *pResult, void *pUserData);
 	static void ConBlockerList(IConsole::IResult *pResult, void *pUserData);
 	static void ConBlockerWhitelist(IConsole::IResult *pResult, void *pUserData);
 	static void ConBlockerFreezeTimeout(IConsole::IResult *pResult, void *pUserData);
+	static void ConAdminMoney(IConsole::IResult *pResult, void *pUserData);
+	static void ConAdminLevels(IConsole::IResult *pResult, void *pUserData);
+	static void ConAdminUpgrade(IConsole::IResult *pResult, void *pUserData);
+	static void ConAdminCosmetic(IConsole::IResult *pResult, void *pUserData);
+	static void ConAdminTeleport(IConsole::IResult *pResult, void *pUserData);
+	static void ConAdminTeleportAll(IConsole::IResult *pResult, void *pUserData);
+	static void ConAdminTeleportAllXY(IConsole::IResult *pResult, void *pUserData);
 	static void ConProfile(IConsole::IResult *pResult, void *pUserData);
 	static void ConRegister(IConsole::IResult *pResult, void *pUserData);
 	static void ConShop(IConsole::IResult *pResult, void *pUserData);
@@ -262,16 +278,27 @@ public:
 	static void ConTeeTycoonMenuInfo(IConsole::IResult *pResult, void *pUserData);
 	static void ConUnBloody(IConsole::IResult *pResult, void *pUserData);
 	static void ConUnRainbow(IConsole::IResult *pResult, void *pUserData);
-	bool created = false;
+	std::atomic<int> m_EventState{0}; // 0 idle, 1 registration open, 2 event running
+	std::atomic<int> m_EventType{0};
+	int m_EventPhase = 0; // 0 idle, 1 registration, 2 preparation, 3 running
+	int64_t m_EventPhaseEndTick = 0;
+	int64_t m_EventNextUpdateTick = 0;
+	int m_EventRemainingSeconds = 0;
+	int m_EventPlayerCount = 0;
+	int m_EventWinnerClientId = -1;
+	std::mutex m_EventPlayersMutex;
 	sqlite3 *db = nullptr;
 	std::string strSql;
 	const char *sqlStatement = nullptr;
 	char *errMessage = nullptr;
 	void ConSetClan(CPlayer *player);
-	void Teleport(CCharacter *pChr, vec2 Pos);
+	void Teleport(CCharacter *pChr, vec2 Pos, bool ForceBot = false);
 	void SetTeamInvite(int id, int inviteID);
 	std::vector<int> playersJoined;
 	std::vector<int> ignorePlayers;
+	bool TryStartEvent(int EventType, int ClientId);
+	void TickEvents();
+	void FinishEvent(bool TimedOut);
 	IServer *Server() const { return m_pServer; }
 	IConfigManager *ConfigManager() const { return m_pConfigManager; }
 	CConfig *Config() { return m_pConfig; }
@@ -549,8 +576,6 @@ private:
 	static void ConStartEventDm(IConsole::IResult *pResult, void *pUserData);
 	static void ConStartEventFreezeRace(IConsole::IResult *pResult, void *pUserData);
 	static void ConStartEventFng(IConsole::IResult *pResult, void *pUserData);
-	static void ConEventThread(IConsole::IResult *pResult, void *pUserData);
-	static void runThread(IConsole::IResult *pResult, void *pUserData);
 	static void ConStrongHammer(IConsole::IResult *pResult, void *pUserData);
 	static void ConUnStrongHammer(IConsole::IResult *pResult, void *pUserData);
 	static void ConInfHook(IConsole::IResult *pResult, void *pUserData);
