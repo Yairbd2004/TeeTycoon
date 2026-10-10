@@ -148,6 +148,9 @@ public:
 	bool m_Rescuing = false;
 	bool m_Fighting = false;
 	int m_ThreatUntilTick = 0;
+	int m_SelfAggressorId = -1;
+	int m_SelfAggressorSpawnTick = -1;
+	int m_SelfAggressorUntilTick = 0;
 	std::unordered_set<std::string> m_HelpNames;
 	std::unordered_set<std::string> m_BlockNames;
 	int m_FreezeRespawnSeconds = 10;
@@ -235,6 +238,7 @@ public:
 	bool IsHelpTarget(const CPlayer *pTarget, int TargetId) const;
 	bool IsBlockTarget(const CPlayer *pTarget, int TargetId) const;
 	void NotifyProtectedPlayerHurt(int VictimId, int EnemyId, bool DealtDamage);
+	void NotifyAttackedBy(int EnemyId);
 	void checkStuck(bool inSight);
 	void emote();
 	int GetID() { return m_SnapID; }

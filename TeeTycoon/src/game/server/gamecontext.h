@@ -220,6 +220,7 @@ public:
 	bool IsCharacterOnFreezeTile(vec2 Pos);
 	bool IsPlayerFreezeLocked(int ClientId);
 	void OnProtectedPlayerHurt(int VictimId, int EnemyId, bool DealtDamage);
+	void OnBotAttacked(int BotId, int EnemyId);
 	void AutoBlockPetAggressor(int OwnerId, int EnemyId);
 	bool AddBot(int ClientId, int OwnerId, bool UseDropPlayer, bool Virtual = false);
 	int FindFreeBotId(bool Virtual) const;

@@ -45,6 +45,26 @@
 #include <cstdlib>
 
 
+static bool IsHookingCharacter(const CCharacter *pAttacker, int TargetId, vec2 TargetPos)
+{
+	if(!pAttacker)
+		return false;
+	const CCharacterCore *pCore = pAttacker->Core();
+	if(pCore->m_HookState == HOOK_GRABBED)
+		return pCore->HookedPlayer() == TargetId;
+	if(pCore->m_HookState != HOOK_FLYING)
+		return false;
+
+	const vec2 HookDirection = normalize(pCore->m_HookDir);
+	const vec2 ToTarget = TargetPos - pAttacker->GetPos();
+	const float AlongHook = dot(ToTarget, HookDirection);
+	const float AcrossHook = absolute(ToTarget.x * HookDirection.y - ToTarget.y * HookDirection.x);
+	return AlongHook > 0.0f && AlongHook < 1000.0f &&
+		AcrossHook < CCharacterCore::PhysicalSize() * 1.5f &&
+		distance(pCore->m_HookPos, TargetPos) < 128.0f;
+}
+
+
 
 CBot::CBot(CBotEngine *pBotEngine, CPlayer *pPlayer, int ownerid) : m_Genetics(CTarget::NUM_TARGETS,10)
 
@@ -239,6 +259,17 @@ void CBot::NotifyProtectedPlayerHurt(int VictimId, int EnemyId, bool DealtDamage
 	m_ThreatUntilTick = GameServer()->Server()->Tick() + 10 * GameServer()->Server()->TickSpeed();
 }
 
+void CBot::NotifyAttackedBy(int EnemyId)
+{
+	if(EnemyId < 0 || EnemyId >= MAX_CLIENTS || !GameServer()->m_apPlayers[EnemyId] ||
+		!GameServer()->m_apPlayers[EnemyId]->GetCharacter() || GameServer()->m_apPlayers[EnemyId]->m_IsBot ||
+		IsHelpTarget(GameServer()->m_apPlayers[EnemyId], EnemyId))
+		return;
+	m_SelfAggressorId = EnemyId;
+	m_SelfAggressorSpawnTick = GameServer()->m_apPlayers[EnemyId]->GetCharacter()->m_SpawnTick;
+	m_SelfAggressorUntilTick = GameServer()->Server()->Tick() + 5 * GameServer()->Server()->TickSpeed();
+}
+
 void CBot::UpdateTarget()
 {
 	m_Rescuing = false;
@@ -258,10 +289,14 @@ void CBot::UpdateTarget()
 	const bool GlobalBlockSearch = m_pPlayer->m_IsBlocker;
 	const float Radius = GlobalBlockSearch ? std::numeric_limits<float>::infinity() : 750.0f;
 	int RescueId = -1;
-	int BlockId = -1;
+	int AggressorId = -1;
+	int HumanBlockId = -1;
+	int BotBlockId = -1;
 	int FollowId = -1;
 	float RescueDist = 1e30f;
-	float BlockDist = 1e30f;
+	float AggressorDist = 1e30f;
+	float HumanBlockDist = 1e30f;
+	float BotBlockDist = 1e30f;
 	float FollowDist = 1e30f;
 	if(pOwner && GameServer()->IsBotFrozen(pOwner->GetCharacter()))
 	{
@@ -272,6 +307,10 @@ void CBot::UpdateTarget()
 		enemyID >= 0 && enemyID < MAX_CLIENTS && GameServer()->m_apPlayers[enemyID] &&
 		GameServer()->m_apPlayers[enemyID]->GetCharacter() &&
 		GameServer()->m_apPlayers[enemyID]->GetCharacter()->m_SpawnTick == enemyTime;
+	const bool SelfAggressorActive = GameServer()->Server()->Tick() < m_SelfAggressorUntilTick &&
+		m_SelfAggressorId >= 0 && m_SelfAggressorId < MAX_CLIENTS && GameServer()->m_apPlayers[m_SelfAggressorId] &&
+		GameServer()->m_apPlayers[m_SelfAggressorId]->GetCharacter() &&
+		GameServer()->m_apPlayers[m_SelfAggressorId]->GetCharacter()->m_SpawnTick == m_SelfAggressorSpawnTick;
 	for(int ClientId = 0; ClientId < MAX_CLIENTS; ClientId++)
 	{
 		CPlayer *pTarget = GameServer()->m_apPlayers[ClientId];
@@ -283,10 +322,16 @@ void CBot::UpdateTarget()
 		if(!m_pPlayer->m_IsBlocker && pChr->Team() != m_pPlayer->GetCharacter()->Team())
 			continue;
 		const float Dist = distance_squared(MyPos, pChr->GetPos());
-		if(Dist > Radius * Radius || (!GlobalBlockSearch && pOwner && distance_squared(OwnerPos, pChr->GetPos()) > Radius * Radius))
+		const bool HookingBot = !IsHelpTarget(pTarget, ClientId) && IsHookingCharacter(pChr, m_pPlayer->GetCid(), MyPos);
+		const bool AggressorForBot = !IsHelpTarget(pTarget, ClientId) &&
+			((SelfAggressorActive && ClientId == m_SelfAggressorId) || HookingBot);
+		if(Dist > Radius * Radius && !AggressorForBot)
+			continue;
+		if(!GlobalBlockSearch && pOwner && distance_squared(OwnerPos, pChr->GetPos()) > Radius * Radius && !AggressorForBot)
 			continue;
 		const bool ThreatForPet = owner >= 0 && ThreatActive && ClientId == enemyID;
-		if(IsHelpTarget(pTarget, ClientId) && !ThreatForPet && !BlockerDuel)
+		const bool Aggressor = AggressorForBot || ThreatForPet;
+		if(IsHelpTarget(pTarget, ClientId) && !ThreatForPet && !BlockerDuel && !AggressorForBot)
 		{
 			if(GameServer()->IsBotFrozen(pChr) && RescueId != owner && Dist < RescueDist)
 			{
@@ -299,14 +344,35 @@ void CBot::UpdateTarget()
 				FollowDist = Dist;
 			}
 		}
-		else if((IsBlockTarget(pTarget, ClientId) || (ThreatActive && ClientId == enemyID) || BlockerDuel) &&
+		else if((IsBlockTarget(pTarget, ClientId) || ThreatForPet || AggressorForBot || BlockerDuel) &&
 			!GameServer()->IsPlayerFreezeLocked(ClientId) &&
-			(Dist < BlockDist || (ThreatActive && ClientId == enemyID)))
+			(Aggressor || (!pTarget->m_IsBot && Dist < HumanBlockDist) ||
+				(pTarget->m_IsBot && Dist < BotBlockDist)))
 		{
-			BlockId = ClientId;
-			BlockDist = Dist;
+			if(Aggressor)
+			{
+				if(Dist < AggressorDist)
+				{
+					AggressorId = ClientId;
+					AggressorDist = Dist;
+				}
+			}
+			else if(pTarget->m_IsBot)
+			{
+				if(Dist < BotBlockDist)
+				{
+					BotBlockId = ClientId;
+					BotBlockDist = Dist;
+				}
+			}
+			else if(Dist < HumanBlockDist)
+			{
+				HumanBlockId = ClientId;
+				HumanBlockDist = Dist;
+			}
 		}
 	}
+	const int BlockId = AggressorId >= 0 ? AggressorId : HumanBlockId >= 0 ? HumanBlockId : BotBlockId;
 	if(!ThreatActive)
 		ownerAttacked = false;
 	const int TargetId = RescueId >= 0 ? RescueId : BlockId >= 0 ? BlockId : owner >= 0 ? owner : FollowId;

@@ -2786,6 +2786,15 @@ void CGameContext::OnProtectedPlayerHurt(int VictimId, int EnemyId, bool DealtDa
 			pPlayer->m_pBot->NotifyProtectedPlayerHurt(VictimId, EnemyId, DealtDamage);
 }
 
+void CGameContext::OnBotAttacked(int BotId, int EnemyId)
+{
+	if(BotId < 0 || BotId >= MAX_CLIENTS || EnemyId < 0 || EnemyId >= MAX_CLIENTS ||
+		!m_apPlayers[BotId] || !m_apPlayers[BotId]->m_IsBot || !m_apPlayers[BotId]->m_pBot ||
+		!m_apPlayers[EnemyId] || m_apPlayers[EnemyId]->m_IsBot || !m_apPlayers[EnemyId]->GetCharacter())
+		return;
+	m_apPlayers[BotId]->m_pBot->NotifyAttackedBy(EnemyId);
+}
+
 void CGameContext::AutoBlockPetAggressor(int OwnerId, int EnemyId)
 {
 	if(!g_Config.m_SvBotDamageMode || OwnerId < 0 || OwnerId >= MAX_CLIENTS ||
