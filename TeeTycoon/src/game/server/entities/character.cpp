@@ -487,7 +487,11 @@ void CCharacter::FireWeapon()
 	}
 
 	DoWeaponSwitch();
-	vec2 MouseTarget = vec2(m_LatestInput.m_TargetX, m_LatestInput.m_TargetY);
+	// Bots are driven through predicted input and do not receive client direct
+	// input. Their latest direct-input aim therefore remains at its default
+	// value, even though the bot AI has supplied a current target in m_Input.
+	const CNetObj_PlayerInput &FireInput = GetPlayer()->m_IsBot ? m_Input : m_LatestInput;
+	vec2 MouseTarget = vec2(FireInput.m_TargetX, FireInput.m_TargetY);
 	vec2 Direction = normalize(MouseTarget);
 
 	bool FullAuto = false;
